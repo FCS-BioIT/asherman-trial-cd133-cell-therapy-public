@@ -1,0 +1,936 @@
+---
+title: "cell-to-cell-communications_Biop.Rmd"
+output: html_document
+date: '2022-04-01'
+---
+
+<!--
+#-------------------------------------------------------------------------------
+# This script creates a automated report of CCC analysis using a scRNA dataset 
+# with two conditions as input
+# CellChat settings adapted from Santamaria X et al. Nat Commun 14:5890 (2023).
+#
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2022-04-01
+#-------------------------------------------------------------------------------
+Former: auto_cellChat_2groups_v2_populations_T.Rmd
+-->
+
+)
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align = "center", 
+                      out.width = "95%", out.width = 2160, fig.width = 10, 
+                      fig.height = 10)
+```
+ 
+
+```{r}
+## Libraries
+
+library(Seurat)
+library(CellChat)
+library(future)
+library(ComplexHeatmap)
+library(knitr)
+library(SeuratDisk)
+library(RColorBrewer)
+library(ggplot2)
+library(yaml)
+library(this.path)
+```
+
+
+```{r}
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+# Main Function
+
+rankNet_MOD <- function(object, slot.name = "netP", mode = c("comparison", 
+  "single"), comparison = c(1, 2), color.use = NULL, stacked = FALSE, 
+  sources.use = NULL, targets.use = NULL, do.stat = FALSE, 
+  cutoff.pvalue = 0.05, tol = 0.05, thresh = 0.05, show.raw = FALSE, 
+  return.data = FALSE, x.rotation = 90, title = NULL, bar.w = 0.75, 
+  font.size = 8, do.flip = TRUE, x.angle = NULL, y.angle = 0, 
+  x.hjust = 1, y.hjust = 1, axis.gap = FALSE, ylim = NULL, 
+  segments = NULL, tick_width = NULL, rel_heights = c(0.9, 
+    0, 0.1)) 
+{
+  mode <- match.arg(mode)
+  options(warn = -1)
+  object.names <- names(methods::slot(object, slot.name))
+  if (mode == "single") {
+    object1 <- methods::slot(object, slot.name)
+    prob = object1$prob
+    prob[object1$pval > thresh] <- 0
+    if (!is.null(sources.use)) {
+      if (is.character(sources.use)) {
+        if (all(sources.use %in% dimnames(prob)[[1]])) {
+          sources.use <- match(sources.use, dimnames(prob)[[1]])
+        }
+        else {
+          stop("The input `sources.use` should be cell group 
+               names or a numerical vector!")
+        }
+      }
+      idx.t <- setdiff(1:nrow(prob), sources.use)
+      prob[idx.t, , ] <- 0
+    }
+    if (!is.null(targets.use)) {
+      if (is.character(targets.use)) {
+        if (all(targets.use %in% dimnames(prob)[[1]])) {
+          targets.use <- match(targets.use, dimnames(prob)[[2]])
+        }
+        else {
+          stop("The input `targets.use` should be cell group names 
+               or a numerical vector!")
+        }
+      }
+      idx.t <- setdiff(1:nrow(prob), targets.use)
+      prob[, idx.t, ] <- 0
+    }
+    if (sum(prob) == 0) {
+      stop("No inferred communications for the input!")
+    }
+    pSum <- apply(prob, 3, sum)
+    pSum.original <- pSum
+    pSum <- -1/log(pSum)
+    pSum[is.na(pSum)] <- 0
+    idx1 <- which(is.infinite(pSum) | pSum < 0)
+    values.assign <- seq(max(pSum) * 1.1, max(pSum) * 1.5, 
+      length.out = length(idx1))
+    position <- sort(pSum.original[idx1], index.return = TRUE)$ix
+    pSum[idx1] <- values.assign[match(1:length(idx1), position)]
+    pair.name <- names(pSum)
+    df <- data.frame(name = pair.name, contribution = pSum.original, 
+      contribution.scaled = pSum, group = object.names[comparison[1]])
+    idx <- with(df, order(df$contribution))
+    df <- df[idx, ]
+    df$name <- factor(df$name, levels = as.character(df$name))
+    for (i in 1:length(pair.name)) {
+      df.t <- df[df$name == pair.name[i], "contribution"]
+      if (sum(df.t) == 0) {
+        df <- df[-which(df$name == pair.name[i]), ]
+      }
+    }
+    gg <- ggplot(df, aes(x = name, y = contribution.scaled)) + 
+      geom_bar(stat = "identity", width = bar.w) + theme_classic() + 
+      theme(axis.text = element_text(size = 10), axis.text.x = element_blank(), 
+      axis.ticks.x = element_blank(), axis.title.y = element_text(size = 10)) + 
+      xlab("") + ylab("Information flow") + coord_flip()
+    if (!is.null(title)) {
+      gg <- gg + ggtitle(title) + theme(plot.title = element_text(hjust = 0.5))
+    }
+  }
+  else if (mode == "comparison") {
+    prob.list <- list()
+    pSum <- list()
+    pSum.original <- list()
+    pair.name <- list()
+    idx <- list()
+    pSum.original.all <- c()
+    object.names.comparison <- c()
+    for (i in 1:length(comparison)) {
+      object.list <- methods::slot(object, slot.name)[[comparison[i]]]
+      prob <- object.list$prob
+      prob[object.list$pval > thresh] <- 0
+      prob.list[[i]] <- prob
+      if (!is.null(sources.use)) {
+        if (is.character(sources.use)) {
+          if (all(sources.use %in% dimnames(prob)[[1]])) {
+            sources.use <- match(sources.use, dimnames(prob)[[1]])
+          }
+          else {
+            stop("The input `sources.use` should be cell group names 
+                 or a numerical vector!")
+          }
+        }
+        idx.t <- setdiff(1:nrow(prob), sources.use)
+        prob[idx.t, , ] <- 0
+      }
+      if (!is.null(targets.use)) {
+        if (is.character(targets.use)) {
+          if (all(targets.use %in% dimnames(prob)[[1]])) {
+            targets.use <- match(targets.use, dimnames(prob)[[2]])
+          }
+          else {
+            stop("The input `targets.use` should be cell group names 
+                 or a numerical vector!")
+          }
+        }
+        idx.t <- setdiff(1:nrow(prob), targets.use)
+        prob[, idx.t, ] <- 0
+      }
+      if (sum(prob) == 0) {
+        stop("No inferred communications for the input!")
+      }
+      pSum.original[[i]] <- apply(prob, 3, sum)
+      pSum[[i]] <- -1/log(pSum.original[[i]])
+      pair.name[[i]] <- names(pSum.original[[i]])
+      pSum[[i]][is.na(pSum[[i]])] <- 0
+      idx[[i]] <- which(is.infinite(pSum[[i]]) | pSum[[i]] < 
+        0)
+      pSum.original.all <- c(pSum.original.all, pSum.original[[i]][idx[[i]]])
+      object.names.comparison <- c(object.names.comparison, 
+        object.names[comparison[i]])
+    }
+    values.assign <- seq(max(unlist(pSum)) * 1.1, max(unlist(pSum)) * 
+      1.5, length.out = length(unlist(idx)))
+    position <- sort(pSum.original.all, index.return = TRUE)$ix
+    for (i in 1:length(comparison)) {
+      if (i == 1) {
+        pSum[[i]][idx[[i]]] <- values.assign[match(1:length(idx[[i]]), 
+          position)]
+      }
+      else {
+        pSum[[i]][idx[[i]]] <- values.assign[match(length(unlist(idx[1:i - 
+          1])) + 1:length(unlist(idx[1:i])), position)]
+      }
+    }
+    pair.name.all <- as.character(unique(unlist(pair.name)))
+    df <- list()
+    for (i in 1:length(comparison)) {
+      df[[i]] <- data.frame(name = pair.name.all, contribution = 0, 
+        contribution.scaled = 0, group = object.names[comparison[i]], 
+        row.names = pair.name.all)
+      df[[i]][pair.name[[i]], 3] <- pSum[[i]]
+      df[[i]][pair.name[[i]], 2] <- pSum.original[[i]]
+    }
+    contribution.relative <- list()
+    for (i in 1:(length(comparison) - 1)) {
+      contribution.relative[[i]] <- as.numeric(format(df[[length(comparison) - 
+        i + 1]]$contribution/df[[1]]$contribution, digits = 1))
+      contribution.relative[[i]][is.na(contribution.relative[[i]])] <- 0
+    }
+    names(contribution.relative) <- paste0("contribution.relative.", 
+      1:length(contribution.relative))
+    for (i in 1:length(comparison)) {
+      for (j in 1:length(contribution.relative)) {
+        df[[i]][[names(contribution.relative)[j]]] <- contribution.relative[[j]]
+      }
+    }
+    df[[1]]$contribution.data2 <- df[[length(comparison)]]$contribution
+    if (length(comparison) == 2) {
+      idx <- with(df[[1]], order(-contribution.relative.1, 
+        contribution, -contribution.data2))
+    }
+    else if (length(comparison) == 3) {
+      idx <- with(df[[1]], order(-contribution.relative.1, 
+        -contribution.relative.2, contribution, -contribution.data2))
+    }
+    else if (length(comparison) == 4) {
+      idx <- with(df[[1]], order(-contribution.relative.1, 
+        -contribution.relative.2, -contribution.relative.3, 
+        contribution, -contribution.data2))
+    }
+    else {
+      idx <- with(df[[1]], order(-contribution.relative.1, 
+        -contribution.relative.2, -contribution.relative.3, 
+        -contribution.relative.4, contribution, -contribution.data2))
+    }
+    for (i in 1:length(comparison)) {
+      df[[i]] <- df[[i]][idx, ]
+      df[[i]]$name <- factor(df[[i]]$name, levels = as.character(df[[i]]$name))
+    }
+    df[[1]]$contribution.data2 <- NULL
+    df <- do.call(rbind, df)
+    df$group <- factor(df$group, levels = object.names.comparison)
+    if (is.null(color.use)) {
+      color.use = ggPalette(length(comparison))
+    }
+    df$group <- factor(df$group, levels = rev(levels(df$group)))
+    color.use <- rev(color.use)
+    if (do.stat & length(comparison) == 2) {
+      for (i in 1:length(pair.name.all)) {
+        if (nrow(prob.list[[j]]) != nrow(prob.list[[1]])) {
+          stop("Statistical test is not applicable to datasets 
+               with different cellular compositions! 
+               Please set `do.stat = FALSE`")
+        }
+        prob.values <- matrix(0, nrow = nrow(prob.list[[1]]) * 
+          nrow(prob.list[[1]]), ncol = length(comparison))
+        for (j in 1:length(comparison)) {
+          if (pair.name.all[i] %in% pair.name[[j]]) {
+            prob.values[, j] <- as.vector(prob.list[[j]][, 
+              , pair.name.all[i]])
+          }
+          else {
+            prob.values[, j] <- NA
+          }
+        }
+        prob.values <- prob.values[rowSums(prob.values, 
+          na.rm = TRUE) != 0, , drop = FALSE]
+        if (nrow(prob.values) > 3 & sum(is.na(prob.values)) == 
+          0) {
+          pvalues <- wilcox.test(prob.values[, 1], prob.values[, 
+            2], paired = TRUE)$p.value
+        }
+        else {
+          pvalues <- 0
+        }
+        pvalues[is.na(pvalues)] <- 0
+        df$pvalues[df$name == pair.name.all[i]] <- pvalues
+        df$pvalues_adj <- p.adjust(p = df$pvalues, method = "fdr")
+        
+      }
+    }
+    if (length(comparison) == 2) {
+      if (do.stat) {
+        colors.text <- ifelse((df$contribution.relative < 
+          1 - tol) & (df$pvalues_adj < cutoff.pvalue), color.use[2], 
+          ifelse((df$contribution.relative > 1 + tol) & 
+            df$pvalues_adj < cutoff.pvalue, color.use[1], 
+            "black"))
+      }
+      else {
+        colors.text <- ifelse(df$contribution.relative < 
+          1 - tol, color.use[2], ifelse(df$contribution.relative > 
+          1 + tol, color.use[1], "black"))
+      }
+    }
+    else {
+      message("The text on the y-axis will not be colored 
+              for the number of compared datasets larger than 3!")
+      colors.text = NULL
+    }
+    for (i in 1:length(pair.name.all)) {
+      df.t <- df[df$name == pair.name.all[i], "contribution"]
+      if (sum(df.t) == 0) {
+        df <- df[-which(df$name == pair.name.all[i]), 
+          ]
+      }
+    }
+    if (stacked) {
+      gg <- ggplot(df, aes(x = name, y = contribution, 
+        fill = group)) + geom_bar(stat = "identity", 
+        width = bar.w, position = "fill") + xlab("") + 
+        ylab("Relative information flow")
+      gg <- gg + geom_hline(yintercept = 0.5, linetype = "dashed", 
+        color = "grey50", size = 0.5)
+    }
+    else {
+      if (show.raw) {
+        gg <- ggplot(df, aes(x = name, y = contribution, 
+          fill = group)) + geom_bar(stat = "identity", 
+          width = bar.w, position = position_dodge(0.8)) + 
+          xlab("") + ylab("Information flow")
+      }
+      else {
+        gg <- ggplot(df, aes(x = name, y = contribution.scaled, 
+          fill = group)) + geom_bar(stat = "identity", 
+          width = bar.w, position = position_dodge(0.8)) + 
+          xlab("") + ylab("Information flow")
+      }
+      if (axis.gap) {
+        gg <- gg + theme_bw() + theme(panel.grid = element_blank())
+        gg.gap::gg.gap(gg, ylim = ylim, segments = segments, 
+          tick_width = tick_width, rel_heights = rel_heights)
+      }
+    }
+    gg <- gg + CellChat_theme_opts() + theme_classic()
+    if (do.flip) {
+      gg <- gg + coord_flip() + 
+        theme(axis.text.y = element_text(colour = colors.text))
+      if (is.null(x.angle)) {
+        x.angle = 0
+      }
+    }
+    else {
+      if (is.null(x.angle)) {
+        x.angle = 45
+      }
+      gg <- gg + scale_x_discrete(limits = rev) + 
+        theme(axis.text.x = element_text(colour = rev(colors.text)))
+    }
+    gg <- gg + theme(axis.text = element_text(size = font.size), 
+      axis.title.y = element_text(size = font.size))
+    gg <- gg + scale_fill_manual(name = "", values = color.use)
+    gg <- gg + guides(fill = guide_legend(reverse = TRUE))
+    gg <- gg + theme(axis.text.x = element_text(angle = x.angle, 
+      hjust = x.hjust), axis.text.y = element_text(angle = y.angle, 
+      hjust = y.hjust))
+    if (!is.null(title)) {
+      gg <- gg + ggtitle(title) + theme(plot.title = element_text(hjust = 0.5))
+    }
+  }
+  if (return.data) {
+    df$contribution <- abs(df$contribution)
+    df$contribution.scaled <- abs(df$contribution.scaled)
+    return(list(signaling.contribution = df, gg.obj = gg))
+  }
+  else {
+    return(gg)
+  }
+}
+
+```
+
+
+```{r args}
+
+# Load config
+config <- yaml.load_file(find_config())
+
+# Set folders and parameters
+sc_file <- config$cell_to_cell_communication$input_file
+output_folder <- config$cell_to_cell_communication$output_dir
+plot_folder <- file.path(output_folder,"Plots")
+default_ident <- "cell_type_AS_v2"
+group_var <- "Treatment_stage"
+save_file <- file.path(output_folder,config$cell_to_cell_communication$ccc_file)
+
+```
+
+# CCC analysis {.tabset}
+
+Analysing `r basename(sc_file)` data.
+Removing cycling cells and Mast cells
+
+
+```{r}
+
+# Load Input Dataset
+sc_object <- LoadH5Seurat(sc_file)
+cell_type_AS_v2 <- sc_object$cell_type_final_AS
+
+cell_type_AS_v2[which(sc_object$integrated_snn_res.0.8 == 6)] <- 
+  "Perivascular"
+cell_type_AS_v2[which(sc_object$integrated_snn_res.0.8 == 15)] <- 
+  "Myofibroblasts"
+cell_type_AS_v2[which(sc_object$integrated_snn_res.0.8 == 17)] <- 
+  "SMC_ACTG2"
+sc_object$cell_type_AS_v2 <- cell_type_AS_v2
+
+#  In order to keep the same label order in the plots, 
+#  we keep the old labels. Please, rename after: 
+# - "Epithelium_SLPI" to  "AS Epithelium"
+# - "Myofibroblasts" to "Contractile PV"
+# - "SMC_ACTG2" to "SMC"
+
+# Removing cycling cells and Mast cells
+sc_object <- sc_object[,sc_object$cell_type_AS_v2 != "T cells"]
+sc_object <- sc_object[,sc_object$cell_type_AS_v2 != "Mast cells"]
+sc_object <- sc_object[,sc_object$cell_type_AS_v2 != "Cycling cells"]
+
+
+DimPlot(sc_object, group.by = default_ident, label = TRUE)
+DimPlot(sc_object, group.by = default_ident, label = TRUE, split.by = group_var)
+
+
+DefaultAssay(sc_object) <- "RNA"
+
+sc_object <- NormalizeData(sc_object)
+sc_list <- SplitObject(object = sc_object, split.by = group_var)
+
+rm(sc_object)
+gc(full = TRUE, reset = TRUE)
+```
+
+
+## CCC in `r names(sc_list)[[1]]` {.tabset}
+
+
+```{r CCC group1}
+# Loading cell chat DB
+CellChatDB <- CellChat::CellChatDB.human 
+showDatabaseCategory(CellChatDB)
+CellChatDB.use <- CellChatDB
+
+if (length(unique(sc_list[[1]]@meta.data[,default_ident])) < 12) {
+  
+  cell_color <- RColorBrewer::brewer.pal(
+    n = length(unique(sc_list[[1]]@meta.data[,default_ident])), name = "Set3")
+
+} else {
+  
+  cell_color <- 
+    scPalette(length(unique(sc_list[[1]]@meta.data[,default_ident])))
+  
+}
+
+cell_order <- order(unique(sc_list[[1]]@meta.data[,default_ident]))
+
+ccc_1_group <- createCellChat(object = sc_list[[1]], group.by = default_ident,
+                              assay = "RNA")
+ccc_1_group@DB <- CellChatDB.use
+
+ # This step is necessary even if using the whole database
+ccc_1_group <- subsetData(ccc_1_group)
+plan("multicore", workers = 8) # do parallel
+options(future.globals.maxSize = 1000 * 1024^2)
+
+
+ccc_1_group <- identifyOverExpressedGenes(ccc_1_group)
+ccc_1_group <- identifyOverExpressedInteractions(ccc_1_group)
+
+ccc_1_group <- computeCommunProb(ccc_1_group, population.size = T)
+ccc_1_group <- filterCommunication(ccc_1_group, min.cells = 10)
+ccc_1_group <- computeCommunProbPathway(ccc_1_group)
+
+ccc_1_group <- aggregateNet(ccc_1_group)
+
+```
+
+### Exploratory CCC plots `r (names(sc_list)[[1]])`
+
+```{r}
+groupSize <- as.numeric(table(ccc_1_group@idents))
+par(mfrow = c(1,2), xpd = TRUE)
+netVisual_circle(ccc_1_group@net$count, vertex.weight = groupSize, 
+                 weight.scale = T, label.edge = FALSE, 
+                 title.name = "Number of interactions")
+netVisual_circle(ccc_1_group@net$weight, vertex.weight = groupSize,
+                 weight.scale = T, label.edge = FALSE, 
+                 title.name = "Interaction weights/strength")
+```
+
+
+```{r, fig.height= 16, fig.width=16}
+mat <- ccc_1_group@net$weight
+par(mfrow = c(round(ncol(mat)/4),round(ncol(mat)/4)), xpd = TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat),
+                 dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, 
+                   edge.weight.max = max(mat), title.name = rownames(mat)[i],
+                   color.use = cell_color)
+}
+```
+
+### CCC networks by main pathway `r (names(sc_list)[[1]])`
+
+```{r, fig.height=13, fig.width=6}
+pathways_all <- ccc_1_group@netP$pathways
+
+dir.create(file.path(plot_folder, names(sc_list)[[1]],"Contribution_pathways"), 
+           showWarnings = FALSE)
+dir.create(file.path(plot_folder, names(sc_list)[[1]]), showWarnings = FALSE)
+dir.create(file.path(plot_folder, names(sc_list)[[1]],"Contribution_pathways"),
+           showWarnings = FALSE)
+
+for (pathway in pathways_all) {
+  gg_contribu <- netAnalysis_contribution(ccc_1_group, signaling = pathway, 
+                                          font.size = 10)
+  ggsave(
+    filename = file.path(plot_folder, 
+                         names(sc_list)[[1]],"Contribution_pathways",
+                         paste(pathway, names(sc_list)[[1]],
+                               "_contribu.png",sep = "")), 
+    plot = gg_contribu, device = "png", create.dir = TRUE)
+}
+```
+
+```{r}
+dir.create(file.path(plot_folder, names(sc_list)[[1]],"chor_pathways"), 
+           showWarnings = FALSE)
+
+for (pathway in pathways_all) {
+  png(
+    filename = file.path(plot_folder, names(sc_list)[[1]],"chor_pathways",
+                         paste(pathway, names(sc_list)[[1]], "_pathway.png",
+                               sep = "")))
+  netVisual_aggregate(ccc_1_group, signaling = pathway, color.use = cell_color,
+                      cell.order = cell_order,thresh = 0.05)
+  dev.off()
+}
+```
+
+
+### CCC signaling roles `r (names(sc_list)[[1]])`
+
+```{r, fig.height=10}
+plan("sequential")
+ccc_1_group <- netAnalysis_computeCentrality(ccc_1_group, slot.name = "netP")
+
+ht1 <- netAnalysis_signalingRole_heatmap(ccc_1_group, pattern = "outgoing", 
+                                         color.use = cell_color, height = 20)
+ht2 <- netAnalysis_signalingRole_heatmap(ccc_1_group, pattern = "incoming", 
+                                         color.use = cell_color, height = 20)
+ht1 + ht2
+```
+
+
+## CCC in `r (names(sc_list)[[2]])` {.tabset}
+
+
+```{r CCC group2}
+# Loading cell chat DB
+CellChatDB <- CellChat::CellChatDB.human 
+showDatabaseCategory(CellChatDB)
+CellChatDB.use <- CellChatDB
+
+if (length(unique(sc_list[[2]]@meta.data[,default_ident])) < 12) {
+  
+  cell_color <- 
+    RColorBrewer::brewer.pal(
+      n = length(unique(sc_list[[2]]@meta.data[,default_ident])), name = "Set3")
+
+} else {
+  
+  cell_color <- 
+    scPalette(length(unique(sc_list[[2]]@meta.data[,default_ident])))
+  
+}
+
+cell_order <- order(unique(sc_list[[2]]@meta.data[,default_ident]))
+
+ccc_2_group <- createCellChat(object = sc_list[[2]], group.by = default_ident,
+                              assay = "RNA")
+ccc_2_group@DB <- CellChatDB.use
+
+# This step is necessary even if using the whole database
+ccc_2_group <- subsetData(ccc_2_group) 
+plan("multicore", workers = 8) # do parallel
+options(future.globals.maxSize = 1000 * 1024^2)
+
+ccc_2_group <- identifyOverExpressedGenes(ccc_2_group)
+ccc_2_group <- identifyOverExpressedInteractions(ccc_2_group)
+
+ccc_2_group <- computeCommunProb(ccc_2_group, population.size = T)
+ccc_2_group <- filterCommunication(ccc_2_group, min.cells = 10)
+ccc_2_group <- computeCommunProbPathway(ccc_2_group)
+
+ccc_2_group <- aggregateNet(ccc_2_group)
+
+```
+
+### Exploratory CCC plots `r (names(sc_list)[[2]])`
+
+```{r}
+groupSize <- as.numeric(table(ccc_2_group@idents))
+par(mfrow = c(1,2), xpd = TRUE)
+netVisual_circle(
+  ccc_2_group@net$count, vertex.weight = groupSize, weight.scale = T, 
+  label.edge = F, title.name = "Number of interactions")
+
+netVisual_circle(
+  ccc_2_group@net$weight, vertex.weight = groupSize, weight.scale = T, 
+  label.edge = F, title.name = "Interaction weights/strength")
+```
+
+
+```{r, fig.height= 16, fig.width=16}
+mat <- ccc_2_group@net$weight
+par(mfrow = c(round(ncol(mat)/4),round(ncol(mat)/4)), xpd = TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), 
+                 dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, 
+                   edge.weight.max = max(mat), 
+                   title.name = rownames(mat)[i], color.use = cell_color)
+}
+```
+
+### CCC networks by main pathway `r (names(sc_list)[[1]])`
+
+```{r, fig.height=13, fig.width=6}
+pathways_all <- ccc_2_group@netP$pathways
+
+dir.create(file.path(plot_folder, names(sc_list)[[2]],"Contribution_pathways"), 
+           showWarnings = FALSE)
+dir.create(file.path(plot_folder, names(sc_list)[[2]]), showWarnings = FALSE)
+dir.create(file.path(plot_folder, names(sc_list)[[2]],"Contribution_pathways"), 
+           showWarnings = FALSE)
+
+for (pathway in pathways_all) {
+  gg_contribu <- netAnalysis_contribution(ccc_2_group, signaling = pathway,
+                                          font.size = 10)
+  ggsave(
+    filename = file.path(plot_folder, names(sc_list)[[2]],
+                         "Contribution_pathways",paste(pathway, 
+                                                       names(sc_list)[[2]],
+                                                       "_contribu.png",
+                                                       sep = "")), 
+    plot = gg_contribu, device = "png", create.dir = TRUE)
+}
+```
+
+```{r}
+dir.create(file.path(plot_folder, names(sc_list)[[2]],"chor_pathways"), 
+           showWarnings = FALSE)
+
+for (pathway in pathways_all) {
+  png(
+    filename = file.path(plot_folder, names(sc_list)[[2]],"chor_pathways",
+                         paste(pathway, names(sc_list)[[2]], "_pathway.png",
+                               sep = "")))
+  netVisual_aggregate(ccc_2_group, signaling = pathway, color.use = cell_color,
+                      cell.order = cell_order,thresh = 0.05)
+  dev.off()
+}
+```
+
+
+### CCC signaling roles `r (names(sc_list)[[2]])`
+
+```{r, fig.height=10}
+plan("sequential")
+ccc_2_group <- netAnalysis_computeCentrality(ccc_2_group, slot.name = "netP")
+
+ht1 <- netAnalysis_signalingRole_heatmap(ccc_2_group, pattern = "outgoing", 
+                                         color.use = cell_color, height = 20)
+ht2 <- netAnalysis_signalingRole_heatmap(ccc_2_group, pattern = "incoming",
+                                         color.use = cell_color, height = 20)
+ht1 + ht2
+```
+
+
+## CCC comparative analysis `r names(sc_list)[1]` vs `r names(sc_list)[2]` {.tabset}
+
+```{r}
+CC_list <- list(ccc_1_group, ccc_2_group)
+names(CC_list) <- names(sc_list)
+#saveRDS(object = CC_list, file = cc_file_save)
+multiple_CC <- mergeCellChat(CC_list, add.names = names(CC_list))
+
+```
+
+```{r}
+gg1 <- compareInteractions(multiple_CC, show.legend = F, group = c(1,2))
+gg2 <- compareInteractions(multiple_CC, show.legend = F, group = c(1,2), 
+                           measure = "weight")
+gg1 + gg2
+```
+
+```{r}
+par(mfrow = c(1,2), xpd = TRUE)
+gg_net1 <- netVisual_diffInteraction(multiple_CC, weight.scale = T)
+gg_net2 <- netVisual_diffInteraction(multiple_CC, weight.scale = T, 
+                                     measure = "weight")
+
+```
+
+```{r}
+gg1 <- netVisual_heatmap(multiple_CC, color.use = cell_color)
+#> Do heatmap based on a merged object
+gg2 <- netVisual_heatmap(multiple_CC, measure = "weight", 
+                         color.use = cell_color)
+#> Do heatmap based on a merged object
+gg1 + gg2
+
+```
+
+### Heatmap and contribution plots between groups 
+
+```{r, fig.height= 12}
+
+adjust_pvalues <-  TRUE
+if (adjust_pvalues == TRUE) {
+  
+  gg_rank_stacked <- rankNet_MOD(multiple_CC, mode = "comparison", 
+                                 stacked = T, do.stat = TRUE, 
+                                 return.data = TRUE, cutoff.pvalue = 0.01, 
+                                 thresh = 0.01)
+  
+  gg_rank2_not_stacked <- rankNet(multiple_CC, mode = "comparison", 
+                                stacked = F, do.stat = TRUE, 
+                                return.data = TRUE, cutoff.pvalue = 0.01, 
+                                thresh = 0.01)
+
+
+
+  rank_df_common <- 
+    gg_rank_stacked[[1]][which(gg_rank_stacked[[1]]$pvalues_adj < 0.01 & 
+                             (gg_rank_stacked[[1]]$contribution.relative.1 > 0 & 
+                         gg_rank_stacked[[1]]$contribution.relative.1 != Inf)),]
+
+rank_df_unique <- 
+  gg_rank_stacked[[1]][which(gg_rank_stacked[[1]]$pvalues_adj < 0.01 & 
+                            (gg_rank_stacked[[1]]$contribution.relative.1 == 0 | 
+                         gg_rank_stacked[[1]]$contribution.relative.1 == Inf)),]
+
+  gg_rank_stacked[[2]] + gg_rank2_not_stacked[[2]]
+
+} else{ 
+  
+  rank_df <- rankNet(multiple_CC, mode = "comparison", stacked = T, 
+                     do.stat = TRUE, return.data = TRUE)
+  rank_df <- rank_df[[1]][which(rank_df[[1]]$pvalues < 0.01 & 
+                                  (rank_df[[1]]$contribution.relative.1 > 0 & 
+                                rank_df[[1]]$contribution.relative.1 != Inf)),]
+  
+}
+
+```
+
+```{r}
+ht1 <-  netAnalysis_signalingRole_heatmap(CC_list[[1]], pattern = "all", 
+                                       signaling = unique(rank_df_common$name) ,
+                                       title = names(CC_list)[1], width = 6, 
+                                       height = 10, color.heatmap = "OrRd",  
+                                       color.use = cell_color)
+
+ht2 <-  netAnalysis_signalingRole_heatmap(CC_list[[2]], pattern = "all", 
+                                       signaling = unique(rank_df_common$name) ,
+                                       title = names(CC_list)[2], width = 6, 
+                                       height = 10, color.heatmap = "OrRd",  
+                                       color.use = cell_color)
+draw(ht1 + ht2, ht_gap = unit(0.5, "cm"))
+```
+
+### Chor plots of shared signalling pathways {.tabset}
+
+```{r}
+
+par(mfrow = c(1,2), xpd = TRUE)
+out <-  NULL
+for (i in 1:length(unique(rank_df_common$name))) {
+  
+knit_expanded <- paste0("#### ", unique(rank_df_common$name)[i], "\n\n```{r test",i,",results='asis'}","\n\npar(mfrow = c(1,2), xpd=TRUE)\n\nnetVisual_aggregate(CC_list[[1]], signaling = unique(rank_df_common$name)[",i, "],layout = 'circle', edge.width.max = 15, signaling.name = paste(unique(rank_df_common$name)[",i,"], names(CC_list)[1]))\n\nnetVisual_aggregate(CC_list[[2]], signaling = unique(rank_df_common$name)[",i, "],layout = 'circle', edge.width.max = 15, signaling.name = paste(unique(rank_df_common$name)[",i,"], names(CC_list)[2]))\n\ncontri_1 <-  netAnalysis_contribution(CC_list[[1]], signaling = unique(rank_df_common$name)[",i,"], font.size = 10) + ggtitle(paste('Contribution', unique(rank_df_common$name)[",i,"], names(CC_list)[1]))\n\ncontri_2 <-  netAnalysis_contribution(CC_list[[2]], signaling = unique(rank_df_common$name)[",i,"], font.size = 10) + ggtitle(paste('Contribution', unique(rank_df_common$name)[",i,"], names(CC_list)[2]))\n\nprint(contri_1 + contri_2)\n\n```\n\n")
+  out <-  c(out, knit_expanded)
+}
+
+
+
+
+```
+
+`r paste(knit(text = out), collapse = '\n')`
+
+### Chor plots of unique signalling pathways in `r names(sc_list)[[1]]` {.tabset}
+
+
+```{r}
+
+cc1_unique <- 
+  unique(rank_df_unique$name[which(rank_df_unique$contribution.relative.1 != 
+                                     Inf)])
+
+out <-  NULL
+for (cc1_pathway in 1:length(cc1_unique)) {
+
+  
+knit_expanded <- paste0("#### ", cc1_unique[cc1_pathway], "\n\n```{r unique1",cc1_pathway,",results='asis'}","\n\npar(mfrow = c(1,1), xpd=TRUE)\n\nnetVisual_aggregate(CC_list[[1]], signaling = cc1_unique[",cc1_pathway,"],layout = 'circle', edge.width.max = 15, signaling.name = paste(cc1_unique[",cc1_pathway,"], names(CC_list)[1]))\n\ncontri_1 <-  netAnalysis_contribution(CC_list[[1]], signaling = cc1_unique[",cc1_pathway,"], font.size = 10) + ggtitle(paste('Contribution ', cc1_unique[",cc1_pathway,"], names(CC_list)[1]))\n\nprint(contri_1)\n\n```\n\n")
+  out <-  c(out, knit_expanded)
+}
+
+```
+
+`r paste(knit(text = out), collapse = '\n')`
+
+
+### Chor plots of unique signalling pathways in `r names(sc_list)[[2]]` {.tabset}
+
+
+```{r}
+cc2_unique <- 
+  unique(rank_df_unique$name[which(rank_df_unique$contribution.relative.1 == 
+                                     Inf)])
+out <-  NULL
+for (cc2_pathway in 1:length(cc2_unique)) {
+  
+knit_expanded <- paste0("#### ", cc2_unique[cc2_pathway], "\n\n```{r nonunique",cc2_pathway,",results='asis'}","\n\npar(mfrow = c(1,1), xpd=TRUE)\n\nnetVisual_aggregate(CC_list[[2]], signaling = cc2_unique[",cc2_pathway,"],layout = 'circle', edge.width.max = 15, signaling.name = paste(cc2_unique[",cc2_pathway,"], names(CC_list)[2]))\n\ncontri_1 <-  netAnalysis_contribution(CC_list[[2]], signaling = cc2_unique[",cc2_pathway,"], font.size = 10) + ggtitle(paste('Contribution ', cc2_unique[",cc2_pathway,"], names(CC_list)[2]))\n\nprint(contri_1)\n\n```\n\n")
+  out <-  c(out, knit_expanded)
+}
+
+```
+
+`r paste(knit(text = out), collapse = '\n')`
+
+## Differential expressed L-R pairs `r names(sc_list)[[1]]` vs `r names(sc_list)[[2]]` {.tabset}
+
+
+```{r}
+
+multiple_CC <- identifyOverExpressedGenes(multiple_CC, 
+                                          group.dataset = group_var, 
+                                          pos.dataset = names(CC_list)[1], 
+                                          features.name = names(CC_list)[1],
+                                          only.pos = FALSE, thresh.pc = 0.25, 
+                                          thresh.fc = 0.1, thresh.p = 0.05)
+
+net <- netMappingDEG(multiple_CC, features.name = names(CC_list)[1], 
+                     thresh = 0.05)
+
+net.up <- subsetCommunication(multiple_CC, net = net, 
+                              datasets =  names(CC_list)[1],ligand.logFC = 0.2,
+                              receptor.logFC = 0.2)
+
+# extract the ligand-receptor pairs with upregulated ligands and upregulated 
+# recetptors in NL, i.e.,downregulated in LS
+net.down <- subsetCommunication(multiple_CC, net = net, 
+                              datasets = names(CC_list)[2],ligand.logFC = -0.2, 
+                              receptor.logFC = -0.2)
+
+
+gene.up <- extractGeneSubsetFromPair(net.up, multiple_CC)
+gene.down <- extractGeneSubsetFromPair(net.down, multiple_CC)
+
+pairLR.use.up = net.up[, "interaction_name", drop = F]
+```
+
+
+### Up regulated L-R pairs in `r names(sc_list)[[1]]` {.tabset}
+
+```{r, fig.height=10, fig.height=10, message=FALSE, warning=FALSE}
+up_pairs <- unique(net.up$pathway_name)
+out <-  NULL
+for (pathway in 1:length(up_pairs)) {
+      knit_expanded <- paste0("#### ", up_pairs[pathway], "\n\n```{r diff1",pathway,",results='asis'}","\n\nnetVisual_chord_gene(CC_list[[1]], slot.name = 'net', net = net.up[which(net.up$pathway_name == up_pairs[",pathway,"]),], lab.cex = 1, big.gap = 20, title.name = paste0('Up-regulated signaling in ', up_pairs[",pathway,"],' ', names(CC_list)[1]), color.use = cell_color, legend.pos.y = '50')\n\n```\n\n")
+  out <-  c(out, knit_expanded)
+}
+
+
+
+
+```
+
+
+`r paste(knit(text = out), collapse = '\n')`
+
+#### Datatable
+
+```{r}
+DT::datatable(net.up, filter = list(position = 'top', clear = FALSE),
+              options =  list(
+    search = list(regex = TRUE, caseInsensitive = FALSE)))
+```
+
+
+### Down regulated L-R pairs in `r names(sc_list)[[1]]` {.tabset}
+
+```{r, fig.height=10, fig.height=10, message=FALSE, warning=FALSE}
+
+down_pairs <- unique(net.down$pathway_name)
+out <-  NULL
+for (pathway in 1:length(down_pairs)) {
+  
+  knit_expanded <- paste0("#### ", down_pairs[pathway], "\n\n```{r diff2",pathway,",results='asis'}","\n\nnetVisual_chord_gene(CC_list[[2]], slot.name = 'net', net = net.down[which(net.down$pathway_name == down_pairs[",pathway,"]),], lab.cex = 1, big.gap = 20, title.name = paste0('Down-regulated signaling in ',down_pairs[",pathway,"],' ', names(CC_list)[1]), color.use = cell_color, legend.pos.y = '50')\n\n```\n\n")
+  out <-  c(out, knit_expanded)
+ 
+}
+
+
+
+```
+
+`r paste(knit(text = out), collapse = '\n')`
+
+#### Datatable
+
+```{r}
+DT::datatable(net.down, filter = list(position = 'top', clear = FALSE), 
+              options =  list(
+    search = list(regex = TRUE, caseInsensitive = FALSE)))
+```
+
+```{r}
+saveRDS(object = list(CC_list, multiple_CC, net), file = save_file)
+```

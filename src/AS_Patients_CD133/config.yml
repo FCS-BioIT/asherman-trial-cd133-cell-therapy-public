@@ -1,0 +1,34 @@
+raw_data:
+  dir: "input/AS_Patients_CD133/data_raw" 
+
+metadata:
+  file: "metadata/SA_patients_metadata.csv"
+  
+qc_parameters:
+  loaded_cells: 17000 # DoubletFinder parameter
+  mito_ratio_filt: 25 # filter low quality cells
+  nfeature_rna_filt: 500 # filter low quality cells
+  qc_plots_dir: "QC_plots" 
+  qc_stats_file: "12042022_CD133_QC_stats.csv"
+
+filtered_data:
+  dir: "output/AS_Patients_CD133/data_filter"
+  qc_dir: "output/AS_Patients_CD133/data_filter_qc"
+  sc_file_pattern: "_Filter_AS.H5seurat"
+  
+processed_data:
+  dir: "output/AS_Patients_CD133/data_processed"
+  file: "12042022_CD133_SCT_raw.H5Seurat"
+  qc_dir: "output/AS_Patients_CD133/data_processed/qc"
+  nfeature_rna_filt: 750 # filter low quality cells
+
+integration_data:
+  dir: "output/AS_Patients_CD133/data_processed"
+  file: "12042022_AS_CD133_integrated.H5Seurat"
+  qc_dir: "output/AS_Patients_CD133/integration"
+   
+annotation_data:
+  dir: "output/AS_Patients_CD133/data_processed"
+  file: "12042022_AS_CD133_annotated.H5Seurat"
+  qc_dir: "output/AS_Patients_CD133/annotation"
+  file_annotations:  "input/annotations/22072021_annotations.rds"

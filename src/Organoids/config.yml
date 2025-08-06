@@ -1,0 +1,55 @@
+raw_data:
+  dir: "input/Organoids/data_cellbender" 
+  sc_file_pattern: "_CeBender_filtered.h5"
+
+metadata:
+  file: "metadata/SA_organoids_metadata.csv"
+  
+qc_parameters:
+  loaded_cells: 17000 # DoubletFinder parameter
+  mito_ratio_filt: 25 # filter low quality cells
+  nfeature_rna_filt: 500 # filter low quality cells
+  qc_plots_dir: "QC_plots" 
+  qc_stats_file: "00_QC_data_all_CeBender_org.csv"
+
+filtered_data:
+  dir: "output/Organoids/data_filter_qc"
+  sc_file_pattern: "_Filter_Org.H5seurat"
+  
+processed_data:
+  dir: "output/Organoids/data_processed"
+  file: "01_raw_organoids.H5Seurat"
+
+integration_1_data:
+  dir: "output/Organoids/data_processed"
+  file: "02_integrated_organoids.H5Seurat"
+  qc_dir: "output/Organoids/integration1"
+   
+integration_2_data:
+  dir: "output/Organoids/data_processed"
+  file: "03_integrated_filt_1_organoids.H5Seurat"
+  qc_dir: "output/Organoids/integration2"
+  
+integration_3_data:
+  dir: "output/Organoids/data_processed"
+  file: "04_integrated_filt_2_organoids.H5Seurat"  
+  qc_dir: "output/Organoids/integration3"
+  file_ref: "input/Datasets/07_sc_AS_Estonia_Wang_Group_SCT_Main_lineages_clean.H5Seurat"
+  file_ref_as: "input/Datasets/02_labeled_AS_pre_post_epi.H5Seurat"
+  file_markers: "input/data_markers/CanonicalMarkers_rev_3.csv"
+  
+  
+integration_4_data:
+  dir: "output/Organoids/data_processed"
+  file: "05_org_all_samples_filt.H5seurat"  
+  qc_dir: "output/Organoids/integration4"
+  file_annotations:  "input/annotations/22072021_annotations.rds"
+  
+integration_5_data:
+  dir: "output/Organoids/data_processed"
+  file: "06_org_all_samples_filt_PaperIntegration.H5seurat" 
+  qc_dir: "output/Organoids/integration5"
+  file_annotations:  "input/annotations/22072021_annotations.rds"
+
+differential_abundance:
+  dir: "output/Organoids/differential_abundance"

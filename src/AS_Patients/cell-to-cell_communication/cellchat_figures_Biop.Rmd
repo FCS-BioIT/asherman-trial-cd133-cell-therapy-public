@@ -1,0 +1,519 @@
+---
+title: "cellchat_figures_Biop.Rmd"
+output: html_document
+date: '2022-07-20'
+---
+
+<!--
+#-------------------------------------------------------------------------------
+# This script makes figures of CCC analysis using previous saved results 
+
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2022-07-20
+#-------------------------------------------------------------------------------
+Former: cellchat_fig_rev.Rmd
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align = "center", 
+                      out.width = "95%", out.width = 2160, fig.width = 10, 
+                      fig.height = 10)
+```
+ 
+
+
+```{r}
+library(Seurat)
+library(CellChat)
+library(future)
+library(ComplexHeatmap)
+library(knitr)
+library(SeuratDisk)
+library(ggplot2)
+library(ggpubr)
+library(cowplot)
+library(dplyr)
+library(yaml)
+library(this.path)
+```
+
+
+```{r}
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+# Main Function
+
+# Load config
+config <- yaml.load_file(find_config())
+
+# Set folders
+output_folder <- config$cell_to_cell_communication$output_dir
+plot_folder <- file.path(output_folder,"Plots")
+
+# Load ccc object
+ccc_data <- readRDS(config$cell_to_cell_communication$ccc_file)
+names(ccc_data) <- c("CC_list","multiple_CC","net")
+
+
+```
+
+
+Barplot
+
+
+```{r}
+
+dir.create(file.path(plot_folder,"/Barplots"), showWarnings = FALSE, 
+           recursive = TRUE)
+
+data_barplot <- rankNet(ccc_data[[2]], mode = "comparison", stacked = T, 
+                        do.stat = TRUE, return.data = TRUE, 
+                        cutoff.pvalue = 0.01, thresh = 0.001)
+data_barplot_2 <- rankNet(ccc_data[[2]], mode = "comparison", stacked = F, 
+                          do.stat = TRUE, return.data = TRUE, 
+                          cutoff.pvalue = 0.01, thresh = 0.001)
+
+
+df <- data_barplot$signaling.contribution
+df <- df[which(df$pvalues < 0.01),]
+df$fdr <- p.adjust(df$pvalues, method = "fdr")
+
+## Save statistics to csv
+write.csv(df, file.path(plot_folder,"/Barplots/","barplot.csv"))
+
+
+df$group <- factor(df$group, levels = c("A-Pre","B-Post"))
+
+tol <- 0.05
+cutoff.pvalue <-  0.01
+color.use = ggPalette(2)
+
+
+colors.text <- ifelse((df$contribution.relative < 
+          1 - tol) & (df$pvalues < cutoff.pvalue), color.use[1], 
+          ifelse((df$contribution.relative > 1 + tol) & 
+            df$pvalues < cutoff.pvalue, color.use[2], 
+            "black"))
+
+gg <- ggplot(df, aes(x = name, y = contribution, 
+        fill = group)) + geom_bar(stat = "identity", 
+        width = 0.75, position = "fill") + xlab("") + 
+        ylab("Relative information flow")
+gg <- gg + geom_hline(yintercept = 0.5, linetype = "dashed", 
+        color = "grey50", size = 0.5)
+
+gg1 <- gg + coord_flip()  + CellChat_theme_opts() + theme_classic() + 
+  theme(axis.text.y = element_text(colour = colors.text),
+        legend.title = element_blank())
+
+
+
+df_2 <- data_barplot_2$signaling.contribution
+df_2 <- df_2[which(df_2$name %in% df$name ), ]
+
+df_2 <- df_2[which(df$pvalues < 0.01),]
+df_2$group <- factor(df_2$group, levels = c("A-Pre","B-Post"))
+gg <- ggplot(df_2, aes(x = name, y = contribution.scaled, 
+          fill = group)) + geom_bar(position = "dodge",stat = "identity", 
+          width = 0.75) + 
+          xlab("") + ylab("Information flow")
+gg2 <- gg + coord_flip()  + CellChat_theme_opts() + theme_classic() + 
+  theme(axis.text.y = element_text(colour = colors.text),
+        legend.title = element_blank())
+
+
+
+
+multiple_barplot <- ggarrange(gg1, gg2, ncol = 2, common.legend = T)
+ggsave(filename = file.path(plot_folder,"Barplots","barplot.svg"),
+       device = "svg", bg = NULL, width = 6, height = 12, dpi = 320, 
+       plot = multiple_barplot, fix_text_size = F)
+
+```
+
+## Routes to replots
+Change myofibroblast by PV contractile and also change epithelium AS
+
+
+
+```{r, fig.width= 18, fig.height=18}
+
+
+
+new_cluster_name <- levels(ccc_data$CC_list[[1]]@idents)
+new_cluster_name[which(new_cluster_name == "Myofibroblasts")] <- 
+  "Contractile PV"
+new_cluster_name[which(new_cluster_name == "Epithelium_SLPI")] <- 
+  "AS Epithelium"
+
+new_cluster_name[which(new_cluster_name == "SMC_ACTG2")] <- 
+  "SMC"
+
+ccc_data$CC_list[[1]] <- 
+  updateClusterLabels(ccc_data$CC_list[[1]], 
+                      old.cluster.name = levels(ccc_data$CC_list[[1]]@idents), 
+                      new.cluster.name = new_cluster_name)
+ccc_data$CC_list[[2]] <- 
+  updateClusterLabels(ccc_data$CC_list[[2]], 
+                      old.cluster.name = levels(ccc_data$CC_list[[2]]@idents),
+                      new.cluster.name = new_cluster_name)
+
+ccc_data$multiple_CC <- 
+  mergeCellChat(ccc_data$CC_list, add.names = names(ccc_data$CC_list))
+ccc_data$multiple_CC <-
+  identifyOverExpressedGenes(ccc_data$multiple_CC, 
+                             group.dataset = "Treatment_stage", 
+                             pos.dataset = names(ccc_data$CC_list)[1],
+                             features.name = names(ccc_data$CC_list)[1], 
+                             only.pos = FALSE, thresh.pc = 0.25,
+                             thresh.fc = 0.1, thresh.p = 0.05)
+
+
+dir.create(file.path(plot_folder,"/Bubbles"), showWarnings = FALSE, 
+           recursive = TRUE)
+
+cell_vector <- varhandle::unfactor(ccc_data$multiple_CC@idents$joint)
+cell_vector[which(cell_vector == "Myofibroblasts")] <- "Contractile PV"
+cell_vector[which(cell_vector == "Epithelium_SLPI")] <- "AS Epithelium"
+cell_vector[which(cell_vector == "SMC_ACTG2")] <- "SMC"
+ccc_data$multiple_CC@idents$joint <- factor(cell_vector)
+pathways_replot <- c("LIGHT","IL4","RESISTIN","WNT","ANGPTL")
+
+for (pathway in pathways_replot) {
+  try({
+  svg(file.path(plot_folder,"Bubbles",paste0(pathway,"_v1.svg")), 
+      width = 12, height = 12)
+  par(mfrow = c(1,2), xpd = TRUE)
+  
+  
+  plot1 <- netVisual_aggregate(ccc_data$CC_list[[1]], 
+                               signaling = pathway,
+                               layout = 'circle', 
+                               edge.width.max = 15, 
+                               signaling.name = paste(pathway, 
+                                                    names(ccc_data$CC_list)[1]))
+  plot2 <- netVisual_aggregate(ccc_data$CC_list[[2]], 
+                               signaling = pathway,
+                               layout = 'circle', 
+                               edge.width.max = 15, 
+                               signaling.name = paste(pathway, 
+                                                    names(ccc_data$CC_list)[2]))
+  print(plot1,plot2)
+  dev.off()
+
+  svglite::svglite(file = file.path(plot_folder,"Bubbles",
+                                    paste0(pathway,"_v2.svg")),
+                   width = 12, height = 6, fix_text_size = FALSE)
+  par(mfrow = c(1,2), xpd = TRUE)
+  plot1 <- netVisual_aggregate(ccc_data$CC_list[[1]], 
+                               signaling = pathway,layout = 'circle', 
+                               edge.width.max = 15, 
+                               signaling.name = paste(pathway, 
+                                                    names(ccc_data$CC_list)[1]))
+  plot2 <- netVisual_aggregate(ccc_data$CC_list[[2]], 
+                               signaling = pathway,layout = 'circle', 
+                               edge.width.max = 15, 
+                               signaling.name = paste(pathway, 
+                                              names(ccc_data$CC_list)[2]))
+  print(plot1,plot2)
+  dev.off()
+  })  
+}
+```
+
+Contributions version 2
+
+```{r}
+
+
+## Contributions
+dir.create(file.path(plot_folder,"Contributions"), showWarnings = FALSE, 
+           recursive = TRUE)
+
+### ANGPTL
+pathways_replot <- c("ANGPTL")
+
+
+for (pathway in pathways_replot) {
+  contri_1 <-  netAnalysis_contribution(ccc_data$CC_list[[1]], 
+                                        signaling = pathway, 
+                                        font.size = 10,
+                                        width = 0.05, return.data = T)
+contri_2 <-  netAnalysis_contribution(ccc_data$CC_list[[2]],
+                                      signaling = pathway, 
+                                      font.size = 10, 
+                                      width = 0.05, return.data = T)
+
+contri_1$LR.contribution$grop <- rep("A-Pre", nrow(contri_1$LR.contribution))
+contri_2$LR.contribution$grop <- rep("B-Post", nrow(contri_2$LR.contribution))
+
+contri_merge <- merge(contri_1$LR.contribution, contri_2$LR.contribution,
+                      all = T)
+
+contri_merge <- contri_merge[order(contri_merge$contribution, decreasing = T),]
+rownames(contri_merge) <- 1:nrow(contri_merge)
+contri_merge$name <- forcats::fct_reorder(contri_merge$name, 
+                                          contri_merge$contribution)
+
+contri_custom_plot <- ggplot(
+  data = contri_merge, 
+  aes(x = contribution,
+      y = name, fill = grop)) + 
+  geom_bar(stat = "identity", width = 0.75) +
+  facet_wrap(~ grop) + ggtitle(paste("Contribution", pathway)) + 
+  ylab("") + xlab("Relative contribution") + theme_classic() + 
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 12,
+                                   face = "bold", color = "black"), 
+        strip.text.x = element_text(size = 14, face = "bold",
+                                    color = "black"),
+        legend.position = "none",
+        title = element_text(size = 14, face = "bold", color = "black"))
+
+ggsave(filename = file.path(plot_folder,"Contributions",
+                            paste0("plot_rev2_",pathway,
+                                   "_contribution_V2_large.svg")),
+       device = "svg", width = 8, height = 4, dpi = 320)
+}
+
+
+### WNT
+pathways_replot <- c("WNT")
+
+
+
+for (pathway in pathways_replot) {
+  contri_1 <-  netAnalysis_contribution(ccc_data$CC_list[[1]], 
+                                        signaling = pathway, 
+                                        font.size = 10,
+                                        width = 0.05, return.data = T)
+contri_2 <-  netAnalysis_contribution(ccc_data$CC_list[[2]],
+                                      signaling = pathway, 
+                                      font.size = 10, 
+                                      width = 0.05, return.data = T)
+
+contri_1$LR.contribution$grop <- rep("A-Pre", nrow(contri_1$LR.contribution))
+contri_2$LR.contribution$grop <- rep("B-Post", nrow(contri_2$LR.contribution))
+
+contri_merge <- merge(contri_1$LR.contribution, contri_2$LR.contribution,
+                      all = T)
+
+contri_merge <- contri_merge[order(contri_merge$contribution, decreasing = T),]
+rownames(contri_merge) <- 1:nrow(contri_merge)
+contri_merge$name <- forcats::fct_reorder(contri_merge$name, 
+                                          contri_merge$contribution)
+
+contri_custom_plot <- ggplot(
+  data = contri_merge, 
+  aes(x = contribution,
+      y = name, fill = grop)) + 
+  geom_bar(stat = "identity", width = 0.75) +
+  facet_wrap(~ grop) + ggtitle(paste("Contribution", pathway)) + 
+  ylab("") + xlab("Relative contribution") + theme_classic() + 
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 12,
+                                   face = "bold", color = "black"), 
+        strip.text.x = element_text(size = 14, face = "bold",
+                                    color = "black"),
+        legend.position = "none",
+        title = element_text(size = 14, face = "bold", color = "black"))
+
+ggsave(filename = file.path(plot_folder,"Contributions",
+                            paste0("plot_rev2_",pathway,
+                                   "_contribution_V2_large.svg")),
+       device = "svg", width = 8, height = 8, dpi = 320)
+}
+
+
+
+
+
+```
+
+## Indivual 
+
+```{r}
+
+
+dir.create(file.path(plot_folder,"plot_rev_unique_contribution"),
+           showWarnings = FALSE, recursive = TRUE)
+
+#NGR post
+pathways_replot <- "WNT"
+for (pathway in pathways_replot) {
+  contri_1 <-  netAnalysis_contribution(ccc_data$CC_list[[2]],
+                                        signaling = pathway,
+                                        font.size = 10,width = 0.05, 
+                                        return.data = T)
+ contri_merge <- contri_1$LR.contribution
+  contri_merge$name <- factor(contri_merge$name)
+  contri_merge$name <- forcats::fct_reorder(contri_merge$name, 
+                                            contri_merge$contribution)
+
+  contri_custom_plot <- ggplot(data = contri_merge, 
+                               aes(x = contribution, y = name)) + 
+    geom_bar(stat = "identity", width = 0.75, fill = "#00BFC4") + 
+    ggtitle(paste("Contribution", pathway)) + ylab("") +
+    xlab("Relative contribution") + theme_classic() +
+    theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 12, face = "bold", color = "black"),
+        strip.text.x = element_text(size = 14, face = "bold", color = "black"),
+        legend.position = "none", title = element_text(size = 14, face = "bold",
+                                                       color = "black"))
+
+  ggsave(filename = file.path(plot_folder,"plot_rev_unique_contribution",
+                              paste0(pathway,"_contribution_V2.svg")),
+         device = "svg", width = 8, height = 4, dpi = 320)
+}
+
+
+#WNT post
+pathways_replot <- "WNT"
+for (pathway in pathways_replot) {
+  contri_1 <-  netAnalysis_contribution(ccc_data$CC_list[[2]], 
+                                        signaling = pathway, 
+                                        font.size = 10,width = 0.05,
+                                        return.data = T)
+ contri_merge <- contri_1$LR.contribution
+  contri_merge$name <- factor(contri_merge$name)
+  contri_merge$name <- forcats::fct_reorder(contri_merge$name,
+                                            contri_merge$contribution)
+
+  contri_custom_plot <- ggplot(data = contri_merge, 
+                               aes(x = contribution, y = name)) +
+   geom_bar(stat = "identity", width = 0.75, fill = "#00BFC4") +
+   ggtitle(paste("Contribution", pathway)) + ylab("") +
+   xlab("Relative contribution") + theme_classic() + 
+    theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 12, face = "bold", color = "black"), 
+        strip.text.x = element_text(size = 14, face = "bold", color = "black"), 
+        legend.position = "none", title = element_text(size = 14, face = "bold",
+                                                       color = "black"))
+
+  ggsave(filename = file.path(plot_folder,"plot_rev_unique_contribution",
+                           paste0(pathway,"_contribution_V2.svg")), 
+         device = "svg", width = 8, height = 4, dpi = 320)
+}
+
+
+pathways_replot <- c("IL4","RESISTIN","WNT")
+for (pathway in pathways_replot) {
+  contri_1 <-  netAnalysis_contribution(ccc_data$CC_list[[1]], 
+                                        signaling = pathway, 
+                                        font.size = 10,width = 0.05,
+                                        return.data = T)
+ contri_merge <- contri_1$LR.contribution
+  contri_merge$name <- factor(contri_merge$name)
+  contri_merge$name <- forcats::fct_reorder(contri_merge$name, 
+                                            contri_merge$contribution)
+
+  contri_custom_plot <- ggplot(data = contri_merge, 
+                               aes(x = contribution, y = name)) + 
+    geom_bar(stat = "identity", width = 0.75, fill = "#F8766D") + 
+    ggtitle(paste("Contribution", pathway)) + ylab("") + 
+    xlab("Relative contribution") + theme_classic() + 
+    theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 12, face = "bold", color = "black"), 
+        strip.text.x = element_text(size = 14, face = "bold", color = "black"),
+        legend.position = "none", title = element_text(size = 14, face = "bold", 
+                                                       color = "black"))
+
+  ggsave(filename = file.path(plot_folder,"plot_rev_unique_contribution",
+                           paste0(pathway,"_contribution_V2.svg")), 
+         device = "svg",width = 8, height = 4, dpi = 320)
+
+}
+```
+
+
+
+##
+
+
+```{r}
+
+dir.create(paste0(plot_folder,"/Interactions"),
+           showWarnings = FALSE, recursive = TRUE)
+
+levels_id <- levels(ccc_data[[2]]@idents$joint)
+levels_id
+###LAMININ
+
+Laminin <- netVisual_bubble(ccc_data[[2]],  comparison = c(1,2)
+                   , signaling = "LAMININ", sources.use = c(3,8, 15),
+                   targets.use = c(3,8), angle.x = 45, line.on = T,
+                   line.size = 1, remove.isolate = T)
+
+ggsave(filename = file.path(plot_folder,
+                         "Interactions",
+                         "plot_rev2_Laminin_interactions_SE.svg"),
+       plot = Laminin, device = "svg", width = 10, height = 8)
+
+
+collagen <- netVisual_bubble(ccc_data[[2]],  comparison = c(1,2)
+                   , signaling = "COLLAGEN", sources.use = c(3,8, 15),
+                   targets.use = c(3,8), angle.x = 45, line.on = T, 
+                   line.size = 1, remove.isolate = T)
+
+ggsave(filename = file.path(plot_folder,
+                       "Interactions","plot_rev2_COLLAGEN_interactions_SE.svg"),
+       plot = collagen, device = "svg", width = 10, height = 8)
+
+netVisual_bubble(ccc_data[[2]],  comparison = c(1, 2)
+                   , signaling = "FGF", angle.x = 45, line.on = T, 
+                 line.size = 1, remove.isolate = T, max.dataset = 1)
+
+netVisual_bubble(ccc_data[[2]],  comparison = c(1, 2)
+                   , signaling = "FGF", angle.x = 45, line.on = T,
+                 line.size = 1, remove.isolate = T, max.dataset = 2)
+
+
+recode_factor(ccc_data[[2]]@idents$`A-Pre`, `AS Epithelium` = "Epithelium_SLPI")
+
+levels(ccc_data[[2]]@idents$`A-Pre`)[levels(ccc_data[[2]]@idents$`A-Pre`) ==
+                                       "Epithelium_SLPI"] <- "AS Epithelium"
+levels(ccc_data[[2]]@idents$`B-Post`)[levels(ccc_data[[2]]@idents$`B-Post`) ==
+                                        "Epithelium_SLPI"] <- "AS Epithelium"
+levels(ccc_data[[2]]@idents$`A-Pre`)[levels(ccc_data[[2]]@idents$`A-Pre`) ==
+                                       "Myofibroblasts"] <- "Contractile PV "
+levels(ccc_data[[2]]@idents$`B-Post`)[levels(ccc_data[[2]]@idents$`B-Post`) ==
+                                        "Myofibroblasts"] <- "Contractile PV"
+
+ccc_data[[2]]@net
+
+fgf <- netVisual_bubble(ccc_data[[2]],  comparison = c(1, 2)
+                   , signaling = "FGF", angle.x = 45, line.on = T, 
+                   line.size = 1, remove.isolate = T, show.legend = T)
+fgf <- fgf + theme(axis.text.x = element_text(angle = 65, vjust = 1, hjust = 1))
+
+
+ggsave(filename = file.path(plot_folder,"Interactions","fig7_supp_fgf.svg"), 
+       plot = fgf, device = "svg", width = 8, height = 4, 
+       dpi = 320,fix_text_size = FALSE)
+
+
+WNT <- netVisual_bubble(ccc_data[[2]],  comparison = c(1, 2)
+                   , signaling = "WNT", angle.x = 45, line.on = T, 
+                 line.size = 1, remove.isolate = T)
+
+ggsave(filename = file.path(plot_folder,
+                         "Interactions","plot_rev2_WNT_interactions_SE.svg"),
+       plot = WNT, device = "svg", width = 10, height = 8)
+
+```

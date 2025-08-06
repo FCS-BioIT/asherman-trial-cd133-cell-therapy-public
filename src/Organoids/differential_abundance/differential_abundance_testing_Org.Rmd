@@ -1,0 +1,192 @@
+---
+title: "differential abundance testing"
+output: html_document
+date: '2023-03-14'
+---
+
+<!--
+#-------------------------------------------------------------------------------
+# This script performs differential abundance between cell types
+# Extended from Santamaria X et al. Nat Commun 14:5890 (2023).
+
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2023-03-14
+#-------------------------------------------------------------------------------
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align = "center", 
+                      out.width = "95%", out.width = 3160, fig.width = 12, 
+                      fig.height = 10)
+```
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(varhandle)
+library(dplyr)
+library(ggpubr)
+library(reshape2)
+library(ggbreak) 
+library(edgeR)
+library(yaml)
+library(this.path)
+options(bitmapType="cairo")
+
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+config <- yaml.load_file(find_config())
+
+
+
+## ouput H5seurat object folder
+output_folder <- config$differential_abundance$dir
+dir.create(path = output_folder, recursive = TRUE, showWarnings = FALSE)
+
+
+# Load input Seurat Object
+sc_AS <- LoadH5Seurat(
+  file = file.path(config$integration_5_data$dir,
+                   config$integration_5_data$file))
+   
+```
+
+# Abundance calculation
+
+```{r}
+library(ggpubr)
+library(reshape2)
+
+
+
+## COLORS
+ 
+cell_colors <- c("#D55E00", "#009E73", "#6688CC", "#0064A4",
+                 "#F0E442","#CC79A7","#E69F00")
+
+
+## UMAP 
+umap1_cell <- DimPlot(object = sc_AS, 
+                      group.by = "cell_type_manual_org_v3", 
+                      cols = cell_colors, label = TRUE, split.by = "Group", 
+                      raster = TRUE, raster.dpi = c(1080,1080), pt.size = 4)
+
+
+cell_colors <- c(
+  "#D55E00",
+  "#009E73",
+  "#CC79A7",
+  "#6688CC",
+  "#0064A4",
+  "#F0E442",
+  "#E69F00")
+
+
+bar_plot_cell_types_g <- dittoSeq::dittoBarPlot(
+  object = sc_AS, 
+  var = "cell_type_manual_org_v3", group.by = "Group", 
+  color.panel = cell_colors, split.adjust = 
+    list(scale = "free"), var.labels.reorder = c(1,2,6,3,4,5,7), 
+  x.reorder = c(2,1,3)) + xlab("") + 
+  ggtitle("Cell type distribution across groups")
+
+
+ggsave(
+  filename = file.path(output_folder, "/05-fig_B_bar_supp.svg"), 
+  plot = bar_plot_cell_types_g, 
+  device = "svg", 
+  width = 6, 
+  height = 8, 
+  bg = "white"
+)
+
+
+```
+
+
+```{r}
+
+abundances <- table(sc_AS$cell_type_manual_org_v3, sc_AS$orig.ident) 
+abundances <- unclass(abundances) 
+
+
+# Calc abundances 
+abundances <- apply(abundances, MARGIN = 2, function(x){(x/sum(x))*100})
+abundances_melt <- melt(abundances)
+abundances_melt[,"Group"] <- 
+    sc_AS@meta.data[match(abundances_melt$Var2, 
+                          sc_AS$orig.ident), c("Group")]
+
+abundances_ratios_stats <- abundances_melt %>% 
+  group_by(`Group`,Var1) %>% 
+  summarize(mean = mean(value),
+            sd = sd(value),
+            median = median(value))
+```            
+
+# Differential abundace testing
+
+```{r}
+
+abundances <- table(sc_AS$cell_type_manual_org_v3, sc_AS$Group) 
+abundances_per <- 100*abundances/colSums(abundances)
+write.csv(abundances_per, file = paste0(output_folder,"/abundances.csv"))
+
+
+abundances <- table(sc_AS$cell_type_manual_org_v3, sc_AS$orig.ident) 
+abundances <- unclass(abundances) 
+
+
+extra.info <- sc_AS@meta.data
+extra.info <- extra.info[match(colnames(abundances), 
+                               sc_AS$orig.ident),
+                         c("Group","Patient","orig.ident")]
+row.names(extra.info) <- extra.info$orig.ident
+
+
+
+y.ab <- DGEList(abundances, samples = extra.info)
+
+design <- model.matrix(~ 0 + factor(Group) , y.ab$samples)
+colnames(design) <- c("ASPre", "ASPost","Controls")
+
+
+y.ab <- estimateDisp(y.ab, design)
+summary(y.ab$common.dispersion)
+plotBCV(y.ab, cex = 1)
+fit.ab <- glmQLFit(y.ab, design, robust = TRUE, abundance.trend = FALSE)
+
+summary(fit.ab$var.prior)
+summary(fit.ab$df.prior)
+plotQLDisp(fit.ab, cex = 1)
+
+my.contrasts <- makeContrasts(PostvsPre=ASPost-ASPre, levels=design)
+res100 <- glmQLFTest(fit.ab, contrast=my.contrasts)
+topTags(res100, n = 15,adjust.method = "fdr")
+stats.test <- topTags(res100, n = 15,adjust.method = "fdr")
+
+# Save results csv
+write.csv(
+  x = stats.test, 
+  file = file.path(output_folder, "statistical_test_pre_vs_post.csv")
+)
+
+```
+

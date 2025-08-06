@@ -1,0 +1,214 @@
+---
+title: "03_annotation_CD133.Rmd"
+output: html_document
+date: '2022-04-12'
+
+---
+
+<!--
+#-------------------------------------------------------------------------------
+# This script performs the final annotation of the clusters
+
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2022-04-12
+#-------------------------------------------------------------------------------
+# Former 12042022_AS_CD133_integration_analysis.Rmd
+-->
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align = "center", 
+                      out.width = "95%", out.width = 3160, fig.width = 12, 
+                      fig.height = 10)
+```
+
+
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(dittoSeq)
+library(ggpubr)
+library(dplyr)
+library(future)
+library(WebGestaltR)
+library(yaml)
+library(this.path)
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+config <- yaml.load_file(find_config())
+
+
+
+## Count matrices 
+input_folder <- config$integration_data$dir
+
+## QC plots, QC csv and count matrices processed and filtered (h5seurat format)
+output_folder <- config$annotation_data$dir
+dir.create(output_folder, recursive = TRUE, showWarnings = FALSE)
+
+qc_folder <- config$annotation_data$qc_dir
+dir.create(qc_folder, recursive = TRUE, showWarnings = FALSE)
+
+
+sc_AS <- LoadH5Seurat(
+    file = file.path(input_folder, config$integration_data$file))
+#sc_AS <- DietSeurat(sc_AS)
+
+
+
+# Load gene annotations
+annotations <- readRDS( config$annotation_data$file_annotations) 
+
+
+```
+
+
+
+```{r}
+umap1 <- DimPlot(sc_AS, group.by = "Patient", label = TRUE)
+umap2 <- DimPlot(sc_AS, group.by = "seurat_clusters", label = TRUE)
+umap1 + umap2
+
+sc_AS <- FindClusters(object = sc_AS, resolution = 0.5)
+umap3 <- DimPlot(sc_AS, group.by = "seurat_clusters", label = TRUE)
+
+sc_AS <- FindClusters(object = sc_AS, resolution = 0.3)
+umap4 <- DimPlot(sc_AS, group.by = "seurat_clusters", label = TRUE, 
+                 raster = TRUE)
+ggsave(filename = paste0(output_folder,"/umap_cluster_0.3.svg"), plot = umap4, 
+       device = "svg",
+       width = 7, height = 7)
+
+DefaultAssay(sc_AS) <- "RNA"
+sc_AS <- NormalizeData(sc_AS)
+
+
+sc_markers_cd133 <- FindAllMarkers(sc_AS, min.pct = 0.3)
+sc_markers_cd133 <- sc_markers_cd133 %>%
+    left_join(y = unique(annotations[, c("gene_name", "description")]),
+               by = c("gene" = "gene_name"))
+plan("sequential")
+DefaultAssay(sc_AS) <- "integrated"
+
+DefaultAssay(sc_AS) <- "RNA"
+sc_markers_cd133_0.3 <- FindAllMarkers(sc_AS, min.pct = 0.3)
+sc_markers_cd133_0.3 <- sc_markers_cd133_0.3 %>%
+    left_join(y = unique(annotations[, c("gene_name", "description")]),
+               by = c("gene" = "gene_name"))
+
+```
+
+
+
+```{r}
+top5 <- sc_markers_cd133_0.3 %>% group_by(cluster) %>% top_n(n = 5, 
+                                                             wt = avg_log2FC)
+
+Dotplot_0.3 <- DotPlot(object = sc_AS, assay = "RNA", 
+                       features = unique(top5$gene),
+                       group.by = "seurat_clusters", 
+                       cols = "RdYlBu") +  
+  theme(axis.text.x = element_text(angle = 75, vjust = 1, hjust=1))
+
+ggsave(filename = file.path(qc_folder, "dotplot_0.3.svg"), device = "svg", 
+       width = 12, height = 5, plot = Dotplot_0.3)
+```
+
+Cluster 4,5,10 they are monocytes
+
+Cluster 9 are erythrocytes
+
+Cluster 13 are fibrocytes
+
+Cluster 11 are B cell¿? Not sure
+
+Cluster 7 Plasma Cells
+
+
+```{r}
+cluster_id <- 0:13
+cluster_names <- c("CD133","CD133","CD133","CD133","Monocytes","Monocytes",
+                   "CD133","Plasma cells","CD133","Erythrocytes","Monocytes",
+                   "B cell","CD133","Fibrocytes")
+names(cluster_id) <- cluster_names
+cell_type_CD133 <- plyr::mapvalues(x = sc_AS$integrated_snn_res.0.3, 
+                                   to = names(cluster_id), from = cluster_id)
+sc_AS$cell_type_CD133 <- cell_type_CD133
+umap <- DimPlot(object = sc_AS, group.by = "cell_type_CD133", 
+        label = TRUE, raster = TRUE)
+
+ggsave(filename = file.path(qc_folder,"final_UMAP.svg"), plot = umap, 
+       device = "svg",
+       width = 7, height = 7)
+```
+
+
+# Final figures
+
+```{r}
+
+sc_markers_cd133_Cell_types <- FindAllMarkers(object = sc_AS, 
+                                              test.use = "MAST", 
+                                              min.pct = 0.25, assay = "RNA")
+
+TOP10 <- sc_markers_cd133_Cell_types %>% group_by(cluster) %>% 
+  top_n(n = 10, wt = avg_log2FC)
+dotplot_cell_type <- DotPlot(sc_AS, assay = "RNA", group.by = "cell_type_CD133", 
+                             features = c(unique(TOP10$gene),"PROM1"), 
+                             cols = "RdYlBu") + 
+  theme(axis.text.x = element_text(angle = 75, vjust = 1, hjust=1))
+
+ggsave(filename = file.path(qc_folder,"dotplot_cell_type.svg"),
+       plot = dotplot_cell_type, 
+       device = "svg", height = 4, width = 12, dpi = 320)
+
+umap_f1 <- DimPlot(object = sc_AS, group.by = "cell_type_CD133", label = TRUE) +
+  ggtitle("Cell types in CD133+ samples")
+
+color_patient <- RColorBrewer::brewer.pal(n = 10, name = "Set3")
+
+promp1 <- VlnPlot(object = sc_AS, features = "PROM1", cols = color_patient, 
+                  group.by = "Patient") 
+promp1 <- promp1 + ggtitle("Expression of PROM1 (CD133)")
+umap2_promp <- FeaturePlot(object = sc_AS, features = "PROM1",
+                           max.cutoff = "q95", min.cutoff = "q5", 
+                           cols = c("Grey","Red"))
+umap2_promp <- umap2_promp + ggtitle("Expression of PROM1 (CD133)")
+ggsave(filename = file.path(qc_folder, "umap1.svg"), plot = umap_f1, 
+       device = "svg", width = 8, 
+       height = 8, dpi = 320)
+ggsave(filename = file.path(qc_folder, "prop1.svg"), plot = promp1, 
+       device = "svg", width = 8, 
+       height = 8, dpi = 320)
+ggsave(filename = file.path(qc_folder, "umap_prop1.svg"), 
+       plot = umap2_promp, device = "svg",
+       width = 8, height = 8, dpi = 320)
+ggsave(filename = file.path(qc_folder, "dotplot_cd133.svg"), 
+       plot = dotplot_cell_type, device = "svg",
+       width = 13, height = 4, dpi = 320)
+
+write.csv(x = sc_markers_cd133_Cell_types, 
+          file = file.path(qc_folder, "cell_type_markers_MAST_CD133.csv"))
+
+SaveH5Seurat(
+  object = sc_AS, 
+  filename = file.path(output_folder, config$annotation_data$file))
+```

@@ -1,0 +1,124 @@
+---
+title: "01_merge_Bender_Org"
+output: html_document
+date: "2023-03-07"
+---
+
+<!--
+#-------------------------------------------------------------------------------
+# This script processes filtered single-cell RNA-seq count matrices stored in
+# .h5seurat format, adds metadata information, and merges them into a single
+# Seurat .h5seurat object for downstream analysis.
+
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2023-03-07
+#-------------------------------------------------------------------------------
+# Former 01_merge_Bender_Org.Rmd
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align ='center', 
+                      out.width = "95%", out.width = 3160, fig.width = 12, 
+                      fig.height = 10)
+```
+
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(yaml)
+library(this.path)
+options(bitmapType = "cairo")
+
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+config <- yaml.load_file(find_config())
+
+
+## Count matrices processed and filtered (h5seurat format)
+input_folder <- config$filtered_data$dir
+
+## H5seurat object with all data and metadata
+output_folder <- config$processed_data$dir
+dir.create(path = output_folder, recursive = TRUE, showWarnings = FALSE)
+
+```
+
+
+```{r}
+files_ASH <- c(list.files(path = input_folder, full.names = TRUE, 
+                          include.dirs = FALSE, 
+                          pattern = config$filtered_data$sc_file_pattern))
+
+for (sc_file in files_ASH) {
+  
+  nm <- SeuratDisk::LoadH5Seurat(sc_file)
+  objname <- gsub(pattern = "_CeBender_filtered_Filter_Org.H5seurat", 
+                  replacement = "",basename(sc_file))
+  objname <- gsub(pattern = "run_count_|run_", replacement = "sc_obj_",objname)
+  assign(objname, nm)
+  
+}
+
+sc_list <- c(unlist(mget(ls(pattern = "sc_obj"))))
+sc_names <- gsub(pattern = ".*\\_", x = ls(pattern = "sc_obj"), 
+                 replacement = "")
+sc_run <- stringr::str_extract(pattern = "[0-9]{4}", 
+                               string = ls(pattern = "sc_obj"))
+sc_run_names <- paste0(sc_run,"_",sc_names)
+
+sc_multiple <- sc_list[[1]]
+sc_multiple <- merge(sc_multiple, y = sc_list[2:length(sc_list)], 
+                     add.cell.ids = sc_names)
+
+rm(list = ls(pattern = "sc_obj.*",))
+rm(sc_list)
+rm(nm)
+gc()
+DietSeurat(sc_multiple)
+```
+
+
+```{r}
+metadata <- read.csv(file = config$metadata$file)
+group <- plyr::mapvalues(x = sc_multiple$orig.ident, 
+                         to = metadata$Group, from = metadata$Sample)
+patient <- plyr::mapvalues(x = sc_multiple$orig.ident, 
+                           to = metadata$Patient, from = metadata$Sample)
+sc_multiple <- AddMetaData(object = sc_multiple, metadata = group, 
+                           col.name = "Group")
+sc_multiple <- AddMetaData(object = sc_multiple, metadata = patient, 
+                           col.name = "Patient")
+
+mito_vln <- VlnPlot(object = sc_multiple, features = "mitoRatio", 
+                    group.by = "Group", pt.size = 0)
+RNA_vln <- VlnPlot(object = sc_multiple, features = "nFeature_RNA", 
+                   group.by = "Group", log = TRUE, pt.size = 0)
+
+```
+
+
+```{r}
+
+## Save processed Seurat object
+SaveH5Seurat(object = sc_multiple, 
+             filename = file.path(config$processed_data$dir,
+                                  config$processed_data$file),overwrite = TRUE)
+```

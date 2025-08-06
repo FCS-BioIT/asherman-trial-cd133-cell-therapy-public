@@ -1,0 +1,190 @@
+---
+title: "01_merge_CD133.Rmd"
+output: html_document
+date: '2022-04-12'
+---
+<!--
+#-------------------------------------------------------------------------------
+# This script processes filtered single-cell RNA-seq count matrices stored in
+# .h5seurat format, adds metadata information and performs several actions in 
+# order to perform a first step filtering:
+# - Merges them into a single Seurat .h5seurat object for downstream analysis.
+# - Removes low quality Samples
+# - Calculate Cycle Score
+# - Preliminary integration using SCT approach
+# - Dimensional reduction and clusterization
+
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2022-02-22
+#-------------------------------------------------------------------------------
+# Former 12042022_AS_CD133_Merge.Rmd
+-->
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align = 'center', 
+                      out.width = "95%", out.width = 3160, fig.width = 12, 
+                      fig.height = 10)
+```
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(dittoSeq)
+library(ggpubr)
+library(yaml)
+library(this.path)
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+config <- yaml.load_file(find_config())
+
+
+
+## Count matrices procesed by Cell Bender (h5 format)
+input_folder <- config$filtered_data$dir
+
+## QC plots, QC csv and count matrices processed and filtered (h5seurat format)
+output_folder <- config$processed_data$dir
+dir.create(output_folder, recursive = TRUE, showWarnings = FALSE)
+
+qc_folder <- config$processed_data$qc_dir
+dir.create(qc_folder, recursive = TRUE, showWarnings = FALSE)
+
+## Load metadata
+metadata_as <- read.csv(file = config$metadata$file)
+metadata_as <- metadata_as[which(metadata_as$Cell_type %in% c("CD133_cells")),]
+table(metadata_as$Patient)
+
+files_AS_CD133 <- list.files(path = input_folder, full.names = T)
+```
+
+
+Mitocondrial ratio of 0.25 and minimum of 500 genes detected 
+
+```{r}
+
+sc_AS_files <- vector(mode = "list", length = length(files_AS_CD133))
+
+
+for (sc_file in files_AS_CD133) {
+  
+  nm <- SeuratDisk::LoadH5Seurat(sc_file)
+  objname <- gsub(pattern = "_Filter_AS.H5seurat", replacement = "",
+                  basename(sc_file))
+  objname <- gsub(pattern = "run_count_|run_", replacement = "sc_obj_",objname)
+  assign(objname, nm)
+  
+}
+
+sc_list <- c(unlist(mget(ls(pattern = "sc_obj"))))
+sc_names <- gsub(pattern = ".*\\_", x = ls(pattern = "sc_obj"), 
+                 replacement = "")
+sc_run <- stringr::str_extract(pattern = "[0-9]{4}", 
+                               string = ls(pattern = "sc_obj"))
+sc_run_names <- paste0(sc_run,"_",sc_names)
+
+sc_multiple <- sc_list[[1]]
+sc_multiple <- merge(sc_multiple, y = sc_list[2:length(sc_list)], 
+                     add.cell.ids = sc_names)
+
+rm(list = ls(pattern = "sc_obj.*",))
+rm(sc_list)
+rm(nm)
+gc()
+DietSeurat(sc_multiple)
+```
+
+
+```{r}
+Patient <- plyr::mapvalues(x = sc_multiple$orig.ident, 
+                           from = metadata_as$Bioinfocode, 
+                           to = metadata_as$Patient)
+
+Cell_type <- plyr::mapvalues(x = sc_multiple$orig.ident, 
+                             from = metadata_as$Cell_type, 
+                             to = metadata_as$Cell_type)
+
+sc_multiple$Patient <- Patient
+sc_multiple$Cell_type <- Cell_type
+
+VlnPlot(object = sc_multiple, features = c("mitoRatio"), 
+        group.by = "Patient", log = FALSE)
+
+VlnPlot(object = sc_multiple, features = c("nFeature_RNA"), 
+        group.by = "Patient", log = FALSE)
+
+more_750_gene <- sc_multiple$nFeature_RNA > 
+  config$processed_data$nfeature_rna_filt
+sc_multiple$more_750_gene <- more_750_gene
+
+```
+
+
+## SCTransfrom
+
+```{r}
+s_genes <- c('UBR7','RFC2','RAD51','MCM2','TIPIN','MCM6','UNG','POLD3','WDR76',
+             'CLSPN','CDC45','CDC6','MSH2','MCM5','POLA1','MCM4','RAD51AP1',
+             'GMNN','RPA2','CASP8AP2','HELLS','E2F8','GINS2','PCNA','NASP',
+             'BRIP1','DSCC1','DTL','CDCA7','CENPU','ATAD2','CHAF1B','USP1',
+             'SLBP','RRM1','FEN1','RRM2','EXO1','CCNE2','BLM','PRIM1','UHRF1')
+
+g2m_genes <- c('NCAPD2','ANLN','TACC3','HMMR','GTSE1','NDC80','AURKA','TPX2',
+               'BIRC5','G2E3','CBX5','RANGAP1','CTCF','CDCA3','TTK','SMC4',
+               'ECT2','CENPA','CDC20','NEK2','CENPF','HJURP','CKS2','DLGAP5',
+               'PIMREG','TOP2A','PSRC1','CDCA8','CKAP2','NUSAP1','KIF23',
+               'KIF11','KIF20B','CENPE','GAS2L3','KIF2C','NUF2','ANP32E',
+               'LBR','MKI67','CCNB2','CDC25C','HMGB2','CKAP2L','BUB1','CDK1',
+               'CKS1B','UBE2C','CKAP5','AURKB','CDCA2','TUBB4B','JPT1')
+
+sc_multiple <- sc_multiple[,which(sc_multiple$more_750_gene)]
+VlnPlot(object = sc_multiple, features = "nFeature_RNA", group.by = "Patient",
+        log = TRUE)
+
+
+sc_multiple <- CellCycleScoring(object = sc_multiple, 
+                                s.features = s_genes, g2m.features = g2m_genes)
+sc_multiple$cc_Phase <- sc_multiple$Phase
+sc_multiple$Phase <- sc_multiple$S.Score - sc_multiple$G2M.Score
+```
+
+
+
+
+
+```{r}
+sc_multiple <- SCTransform(sc_multiple, 
+                           vars.to.regress = c("mitoRatio","Phase"), 
+                           conserve.memory = T)
+sc_multiple <- RunPCA(sc_multiple, verbose = FALSE)
+sc_multiple <- RunUMAP(sc_multiple, dims = 1:30, verbose = FALSE)
+
+sc_multiple <- FindNeighbors(sc_multiple, dims = 1:30, verbose = FALSE)
+sc_multiple <- FindClusters(sc_multiple, verbose = FALSE)
+umap1 <- DimPlot(sc_multiple, group.by = "Patient", label = TRUE)
+ggsave(filename = file.path(qc_folder,"Patient_umap1.svg"), 
+                         device = "svg", dpi = 320, width = 14, 
+                         height = 14, plot = umap1)
+
+
+SaveH5Seurat(
+  object = sc_multiple, 
+  filename = file.path(output_folder, config$processed_data$file))
+```

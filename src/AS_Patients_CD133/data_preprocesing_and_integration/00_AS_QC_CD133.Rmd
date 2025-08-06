@@ -1,0 +1,440 @@
+---
+title: "00_AS_QC_CD133"
+output: html_document
+date: '2022-04-12'
+---
+
+<!--
+#-------------------------------------------------------------------------------
+# This script processes single-cell RNA-seq count matrices stored in .h5ad 
+# format, converting them to normalized Seurat's .h5seurat format for downstream 
+# analysis. For each sample, it performs quality control (QC), including cell 
+# filtering  based on:
+# - Number of detected features
+# - Doublet detection score
+# - Mitochondrial content ratio
+# All QC metrics are exported to CSV files.
+
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2022-04-12
+#-------------------------------------------------------------------------------
+# Former 12042022_AS_CD133.Rmd
+-->
+
+```{r}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align = "center", 
+                      out.width = "95%", out.width = 3160, fig.width = 12, 
+                      fig.height = 10)
+```
+
+
+```{r}
+library(Seurat)
+library(scater)
+library(dittoSeq)
+library(dplyr)
+library(ggpubr)
+library(DoubletFinder)
+library(scds)
+library(ggplot2)
+library(yaml)
+library(this.path)
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+config <- yaml.load_file(find_config())
+
+
+sc_histogram <- function(sco, x_stat, fill_stat = "", 
+                         xlab_stat = "", x_thresholds="") {
+  
+  #Generate a histogram plot from different QC metrics.
+  #sco: A seurat or single cell object.
+  #x_stat: QC metric to be ploted in X axis.
+  #fill_stats: QC metric that filter the cells.
+  #xlab_stat: label to be used in X axis.
+  #
+  #Return a ggplot object
+  #sc_histogram(sc_object, "mitoRatio", "MAD_mito", "Mitochondrial Ratio")
+  
+  
+  plot_histogram <-  sco@meta.data %>% 
+    ggplot(aes_string(x = x_stat, fill = fill_stat)) + 
+    geom_histogram(color = "black", bins = 60, alpha = 0.5) +
+    theme_classic() +
+    ylab("Cells") + xlab(xlab_stat) + 
+    geom_vline(xintercept = x_thresholds, color = "red") 
+  
+  return(plot_histogram)
+  
+}
+
+Doublet_rate_predict <- function(cell_loaded_10x, verbose = FALSE) {
+  
+  # Estimate the multiplet/doublet rate based on the number of the cell loaded
+  # in 10X run. 
+  
+  # cell_loaded_10x: NUmber of cell loaded in the 10x run (int)
+  
+  # Return: Doublet/multiplet rate. Range (0-1)
+  # More info: https://kb.10xgenomics.com/hc/en-us/articles/360001378811-What-is-the-maximum-number-of-cells-that-can-be-profiled-
+  # Created 15/02/2021
+  
+  multiplet_rate <- c(0.004, 0.008, 0.016, 0.023, 0.031,
+                      0.039, 0.046, 0.054, 0.061, 0.069, 0.076)
+  
+  cell_loaded <- c(800, 1600, 3200, 4800, 6400, 
+                   8000, 9600, 11200, 12800, 14400, 16000)
+  
+  multiplet_df <- data.frame(multiplet_rate = multiplet_rate, 
+                             cell_loaded = cell_loaded)
+  
+  if (verbose) {
+    print(ggplot(data = multiplet_df, aes(x = multiplet_rate,
+                                          y = cell_loaded, group = 1)) + 
+            geom_line(col = "blue") + geom_point())
+  }
+  
+  
+  
+  modelo_drop <- lm(multiplet_rate ~ cell_loaded, multiplet_df)
+  
+  if (verbose) {
+    summary(modelo_drop)
+  }
+  
+  
+  predict_df <- data.frame(cell_loaded = cell_loaded_10x)
+  
+  predict(modelo_drop, predict_df, se.fit = TRUE, interval = "prediction")
+  
+  predict_cell <- predict(modelo_drop, predict_df, se.fit = TRUE, 
+                          interval = "prediction")
+  
+  return(predict_cell$fit[1])
+  
+}
+
+
+```
+
+
+```{r}
+
+## Count matrices procesed by Cell Ranger
+input_folder <- config$raw_data$dir
+
+## QC plots, QC csv
+output_folder_qc <- config$filtered_data$qc_dir
+dir.create(output_folder_qc, recursive = TRUE, showWarnings = FALSE)
+
+## Count matrices processed and filtered
+output_folder <- config$filtered_data$dir
+dir.create(output_folder, recursive = TRUE, showWarnings = FALSE)
+
+# List of files to load
+AS_files <- list.files(path = input_folder, full.names = TRUE)
+AS_files <- AS_files[grep(pattern = "CD133|cd133", x = AS_files)]
+
+
+sc_list <- vector(mode = "list", length = length(AS_files))
+
+stats_cells_qc <- data.frame(n_cells_10x = "", n_cells_before_doublets = "", 
+                             n_cells_hq = "", filtered_cells_ratio = "", 
+                             n_doublets = "",intersec_doublet = "", 
+                             intersec_doublet_ratio = "",
+                             mitoratio_mean_pre = "", mitoratio_median_pre = "",
+                             mitoratio_sd_pre = "", gene_mean_pre = "", 
+                             gene_median_pre = "", gene_sd_pre = "", 
+                             counts_mean_pre = "", counts_median_pre = "", 
+                             counts_sd_pre = "", mitoratio_mean_filt = "", 
+                             mitoratio_median_filt = "", mitoratio_sd_filt = "", 
+                             gene_mean_filt = "", gene_median_filt = "", 
+                             gene_sd_filt = "", counts_mean_filt = "", 
+                             counts_median_filt = "", counts_sd_filt = "")
+for (sc_file in 1:length(AS_files)) {
+  set.seed(47)
+  if (file.exists(file.path(output_folder,paste0(
+                         gsub(pattern = ".sc_file", replacement = "",
+                              basename(AS_files[[sc_file]])),
+                         config$filtered_data$sc_file_pattern)))) {
+    
+    print(paste0("Exist ", basename(AS_files[[sc_file]])))
+    next
+  }
+  else {
+    
+    dir.create(
+      recursive = TRUE, 
+      path = file.path(output_folder_qc,
+                    config$qc_parameters$qc_plots_dir,paste0(
+                    gsub(pattern = ".sc_file",
+                         replacement = "",
+                         basename(AS_files[[sc_file]])))))
+
+  print(AS_files[[sc_file]])
+  sc_obj <- CreateSeuratObject(
+    counts = Read10X(
+      data.dir = file.path(AS_files[[sc_file]], "outs","filtered_feature_bc_matrix")),
+    project = basename(AS_files[[sc_file]]))
+  
+  
+  ncell_pre <- ncol(sc_obj)
+  sc_obj$orig.ident <- rep(gsub(pattern = ".sc_file", replacement = "",
+                                x = basename(AS_files[[sc_file]])), 
+                           length(sc_obj$orig.ident))
+  
+  ncells <- length(sc_obj$orig.ident)
+  
+  sc_obj[["mitoRatio"]] <- PercentageFeatureSet(sc_obj, pattern = "^MT-")
+  Seurat::VlnPlot(object = sc_obj, 
+                  features = colnames(sc_obj@meta.data)[c(2:4)],
+                  pt.size = 0.1, ncol = 3)
+  ggsave(
+    filename = file.path(output_folder_qc,config$qc_parameters$qc_plots_dir,
+                      gsub(pattern = ".sc_file", replacement = "",
+                           basename(AS_files[[sc_file]])),
+                      "/vln_pre.pdf"), width = 6, device = "pdf", dpi = 320)
+
+  sc_obj <- Seurat::NormalizeData(
+    object = sc_obj, normalization.method = "LogNormalize", scale.factor = 10000)
+  sc_obj <- Seurat::FindVariableFeatures(
+    object = sc_obj, selection.method = "vst", nfeatures = 2000)
+  sc_obj <- Seurat::ScaleData(
+    object = sc_obj, features = Seurat::VariableFeatures(object = sc_obj))
+  sc_obj <- Seurat::RunPCA(
+    object = sc_obj, features = Seurat::VariableFeatures(object = sc_obj))
+  sc_obj <- Seurat::RunUMAP(
+    sc_obj, dims = 1:10)
+  umap1 <- FeaturePlot(
+    object = sc_obj, features = c("nCount_RNA"),min.cutoff = "q5", 
+    max.cutoff = "q90") 
+  umap2 <- FeaturePlot(
+    object = sc_obj, features = c("nFeature_RNA"),min.cutoff = "q5", 
+    max.cutoff = "q90") 
+  umap3 <- FeaturePlot(
+    object = sc_obj, features = c("mitoRatio"), min.cutoff = "q5",
+    max.cutoff = "q90") 
+
+  ## Filter criteria
+  pass_mito_AND_nfeatures <- (sc_obj$nFeature_RNA >= config$qc_parameters$nfeature_rna_filt) & 
+    (sc_obj$mitoRatio < config$qc_parameter$mito_ratio_filt)
+  
+  
+  sc_obj <- AddMetaData(object = sc_obj, metadata = pass_mito_AND_nfeatures, 
+                        col.name = "pass_mito_AND_nfeatures")
+  umap_fail_1 <- DimPlot(object = sc_obj, group.by = "pass_mito_AND_nfeatures") 
+  ggarrange_pre <- ggarrange(umap1,umap2,umap3,umap_fail_1, nrow = 2,ncol = 2) 
+  
+  ggarrange_pre <- annotate_figure(
+    ggarrange_pre, top = paste0("QC_pre ",
+                                gsub(pattern = ".sc_file", 
+                                     replacement = "",
+                                     basename(AS_files[[sc_file]]))))
+  
+  ggsave(
+    plot = ggarrange_pre, filename = file.path(output_folder_qc,
+                                            config$qc_parameters$qc_plots_dir,
+                                            gsub(pattern = ".sc_file", 
+                                                 replacement = "",
+                                                 basename(AS_files[[sc_file]])),
+                                            "/UMAP_pre.pdf"), width = 6, 
+    device = "pdf", dpi = 32, bg = "white")
+  
+
+  #gene stats
+  gene_mean_pre <- mean(sc_obj$nFeature_RNA)
+  gene_median_pre <- median(sc_obj$nFeature_RNA)
+  gene_sd_pre <- sd(sc_obj$nFeature_RNA)
+  
+  #mito stats
+  mitoratio_mean_pre <- mean(sc_obj$mitoRatio)
+  mitoratio_median_pre <- median(sc_obj$mitoRatio)
+  mitoratio_sd_pre <- sd(sc_obj$mitoRatio)
+  
+  #counts stats
+  counts_mean_pre <- mean(sc_obj$nCount_RNA)
+  counts_median_pre <- median(sc_obj$nCount_RNA)
+  counts_sd_pre <- sd(sc_obj$nCount_RNA)
+  
+  #Filter Bad cells
+  sc_obj <- sc_obj[,which(sc_obj$pass_mito_AND_nfeatures == TRUE)]
+  n_cells_before_doublets <- ncol(sc_obj)
+  
+  #Doublets
+  loaded_cells <- 17000
+  ## DF
+  Double_rate <- Doublet_rate_predict(cell_loaded_10x = loaded_cells)
+  sweep.res.list_sc_obj <- DoubletFinder::paramSweep_v3(seu = sc_obj , 
+                                                        PCs = 1:10, sct = FALSE, 
+                                                        num.cores = 4)
+  
+  sweep.stats_sc_obj <- summarizeSweep(sweep.res.list_sc_obj, GT = FALSE)
+  bcmvn_sc <- find.pK(sweep.stats_sc_obj)
+  
+  ggplot(data = bcmvn_sc, aes(x = pK, y = BCmetric, group = 1)) +
+    geom_line(col = "blue") + geom_point() + 
+    geom_vline(xintercept = 
+                 as.integer(bcmvn_sc[max(bcmvn_sc$BCmetric,
+                                         na.rm = TRUE) == bcmvn_sc$BCmetric,2]),
+               color = "red")
+  nExp_poi <- round(Double_rate*nrow(sc_obj@meta.data))  
+  print(round(Double_rate*nrow(sc_obj@meta.data)))
+  print(
+    as.numeric(
+      as.character(
+        bcmvn_sc[max(bcmvn_sc$BCmetric, 
+                     na.rm = TRUE) == bcmvn_sc$BCmetric,2][1])))
+  sc_obj <- doubletFinder_v3(
+    sc_obj, PCs = 1:10, pN = 0.25, 
+    pK = as.numeric(
+      as.character(bcmvn_sc[max(bcmvn_sc$BCmetric, 
+                                na.rm = TRUE) == bcmvn_sc$BCmetric,2][1])), 
+    nExp = nExp_poi,reuse.pANN = FALSE, sct = FALSE)
+  
+  ## scds
+  scds_result <- scds::cxds_bcds_hybrid(
+    sce = as.SingleCellExperiment(sc_obj), estNdbl = FALSE)
+  sc_obj <- AddMetaData(
+    sc_obj, metadata = scds_result$hybrid_score, col.name = "hybrid_score")
+  sc_obj <- AddMetaData(
+    sc_obj ,metadata = sc_obj$hybrid_score >= 
+      sort(sc_obj$hybrid_score, TRUE)[nExp_poi], 
+    col.name = "hybrid_score_logic")
+  true_names_doubletFinder <- 
+    colnames(sc_obj[,which(sc_obj@meta.data[,7] == "Doublet")])
+  true_names_scds <- names(which(sc_obj$hybrid_score_logic == TRUE))
+  print(table(true_names_doubletFinder %in% true_names_scds))
+  true_names_df_scds <- 
+    true_names_doubletFinder[which(true_names_doubletFinder %in% 
+                                     true_names_scds)]
+  sc_obj <- sc_obj[, which(!(colnames(sc_obj) %in% true_names_df_scds))]
+  
+  ## stats
+  n_doublets <- nExp_poi
+  intersec_doublet <- as.numeric(table(true_names_doubletFinder %in% 
+                                         true_names_scds)[2])
+  intersec_doublet_ratio <- as.numeric(table(true_names_doubletFinder %in%
+                                               true_names_scds)[2])/nExp_poi
+  n_cells_hq = ncol(sc_obj)
+  filtered_cells_ratio = 1 - (n_cells_hq/ncell_pre)
+  
+  sc_obj <- Seurat::NormalizeData(
+    object = sc_obj, normalization.method = "LogNormalize", 
+    scale.factor = 10000)
+  sc_obj <- Seurat::FindVariableFeatures(
+    object = sc_obj, selection.method = "vst", nfeatures = 2000)
+  sc_obj <- Seurat::ScaleData(object = 
+                                
+                                sc_obj, 
+                              features = VariableFeatures(object = sc_obj))
+  sc_obj <- Seurat::RunPCA(object = 
+                           sc_obj, features = VariableFeatures(object = sc_obj))
+  sc_obj <- Seurat::RunUMAP(sc_obj, dims = 1:10)
+  
+  umap1_post <- FeaturePlot(object = 
+                              sc_obj, features = c("nCount_RNA"),
+                            min.cutoff = "q5", max.cutoff = "q90") 
+  umap2_post <- FeaturePlot(object = 
+                              sc_obj, features = c("nFeature_RNA"),
+                            min.cutoff = "q5", max.cutoff = "q90") 
+  umap3_post <- FeaturePlot(object = 
+                              sc_obj, features = c("mitoRatio"), 
+                            min.cutoff = "q5", max.cutoff = "q90") 
+  
+  ggarrange_post <- ggarrange(umap1_post,umap2_post,umap3_post, 
+                              nrow = 2,ncol = 2) 
+  
+  ggarrange_post <- annotate_figure(ggarrange_post, 
+                                    top = paste0("QC_pre ",
+                                                 gsub(pattern = ".sc_file", 
+                                                      replacement = "",
+                                                basename(AS_files[[sc_file]]))))
+  ggsave(
+    plot = ggarrange_post, 
+    filename = file.path(output_folder_qc,config$qc_parameters$qc_plots_dir,
+                      gsub(pattern = ".sc_file", 
+                           replacement = "",
+                           basename(AS_files[[sc_file]])),
+                      "/UMAP_post.pdf"), width = 6, 
+    device = "pdf", dpi = 32, bg = "white")
+
+  
+  #gene stats
+  gene_mean_filt <- mean(sc_obj$nFeature_RNA)
+  gene_median_filt <- median(sc_obj$nFeature_RNA)
+  gene_sd_filt <- sd(sc_obj$nFeature_RNA)
+  
+  #mito stats
+  mitoratio_mean_filt <- mean(sc_obj$mitoRatio)
+  mitoratio_median_filt <- median(sc_obj$mitoRatio)
+  mitoratio_sd_filt <- sd(sc_obj$mitoRatio)
+  
+  #counts stats
+  counts_mean_filt <- mean(sc_obj$nCount_RNA)
+  counts_median_filt <- median(sc_obj$nCount_RNA)
+  counts_sd_filt <- sd(sc_obj$nCount_RNA)
+  
+  stats_vector <- c(n_cells_10x = ncell_pre, 
+                    n_cells_before_doublets = n_cells_before_doublets,
+                    n_cells_hq = ncol(sc_obj), 
+                    filtered_cells_ratio = filtered_cells_ratio,
+                    n_doublets = n_doublets,intersec_doublet = intersec_doublet,
+                    intersec_doublet_ratio = intersec_doublet_ratio,
+                    mitoratio_mean_pre = mitoratio_mean_pre,
+                    mitoratio_median_pre = mitoratio_median_pre, 
+                    mitoratio_sd_pre = mitoratio_sd_pre, 
+                    gene_mean_pre = gene_mean_pre, 
+                    gene_median_pre = gene_median_pre, 
+                    gene_sd_pre = gene_sd_pre, 
+                    counts_mean_pre = counts_mean_pre, 
+                    counts_median_pre = counts_median_pre,
+                    counts_sd_pre = counts_sd_pre, 
+                    mitoratio_mean_filt = mitoratio_mean_filt,
+                    mitoratio_median_filt = mitoratio_median_filt,
+                    mitoratio_sd_filt = mitoratio_sd_filt,
+                    gene_mean_filt = gene_mean_filt, 
+                    gene_median_filt = gene_median_filt,
+                    gene_sd_filt = gene_sd_filt,
+                    counts_mean_filt = counts_mean_filt,
+                    counts_median_filt = counts_median_filt,
+                    counts_sd_filt = counts_sd_filt)
+  
+  stats_cells_qc[basename(AS_files[sc_file]),] <- stats_vector
+  
+  sc_obj <- DietSeurat(sc_obj)
+  
+  ## Save processed Seurat object
+  sc_obj <- DietSeurat(sc_obj)
+  SeuratDisk::SaveH5Seurat(
+    object = sc_obj, 
+    filename = file.path(output_folder,
+                         paste0(gsub(pattern = ".sc_file", replacement = "",
+                                     basename(AS_files[[sc_file]])),
+                                config$filtered_data$sc_file_pattern)))
+  gc()
+  
+  }
+}
+
+```
+```{r}
+write.csv(
+  x = stats_cells_qc, 
+  file = file.path(output_folder_qc,config$qc_parameters$qc_stats_file))
+```

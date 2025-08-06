@@ -1,0 +1,429 @@
+---
+title: "04_annotation"
+output: html_document
+date: '2022-03-11'
+---
+
+<!--
+#-------------------------------------------------------------------------------
+# This script performs several steps:
+# Performs optimal clusterization
+# Final annotation of the clusters
+# Extended and cell type markers adapted from Santamaria X et al. Nat Commun 14:5890 (2023)
+#
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2022-03-07
+#-------------------------------------------------------------------------------
+# Former: 11032022_AS_analysis_integration.Rmd
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align = "center",
+                      out.width = "95%", out.width = 3160, fig.width = 12,
+                      fig.height = 10)
+```
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(dittoSeq)
+library(ggpubr)
+library(dplyr)
+library(tibble)
+library(dittoSeq)
+library(yaml)
+library(this.path)
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+config <- yaml.load_file(find_config())
+
+
+
+## Count matrices procesed by Cell Bender (h5 format)
+input_folder <- config$integration2_data$dir
+
+## QC plots, QC csv and count matrices processed and filtered (h5seurat format)
+output_folder <- config$annotation_data$dir
+dir.create(output_folder, recursive = TRUE, showWarnings = FALSE)
+
+qc_folder <- config$annotation_data$qc_dir
+dir.create(qc_folder, recursive = TRUE, showWarnings = FALSE)
+
+# Load Input Dataset
+sc_AS <- LoadH5Seurat(file = file.path(input_folder, 
+                                       config$integration2_data$file))
+
+# Load gene annotations
+annotations <- readRDS( config$annotation_data$file_annotations) 
+```
+
+
+
+```{r}
+clus_vector <- c(0.5,0.6,0.7,0.8,0.9,1,1.1,1.2,1.3,1.4,1.5,1.6,1.7,
+                 1.8,1.9,2,2.1,2.2,2.3,2.4,2.5,2.6,2.7,2.8,2.9,3)
+
+for (x in clus_vector) {
+  sc_AS <- FindClusters(sc_AS, verbose = FALSE, resolution = x)
+  print(x)
+}
+
+AS_multi_plot0 <- DimPlot(object = sc_AS, group.by = c("integrated_snn_res.0.5",
+                                                       "integrated_snn_res.0.6",
+                                                       "integrated_snn_res.0.7",
+                                                       "integrated_snn_res.0.8",
+                                                       "integrated_snn_res.0.9",
+                                                       "integrated_snn_res.1"),
+                          label = TRUE)
+AS_multi_plot1 <- DimPlot(object = sc_AS, group.by = c("integrated_snn_res.0.9",
+                                                       "integrated_snn_res.1",
+                                                       "integrated_snn_res.1.1",
+                                                       "integrated_snn_res.1.2",
+                                                       "integrated_snn_res.1.3",
+                                                      "integrated_snn_res.1.4"),
+                          label = TRUE)
+AS_multi_plot2 <- DimPlot(object = sc_AS, group.by = c("integrated_snn_res.1.4",
+                                                       "integrated_snn_res.1.5",
+                                                       "integrated_snn_res.1.6",
+                                                       "integrated_snn_res.1.7",
+                                                       "integrated_snn_res.1.8",
+                                                      "integrated_snn_res.1.9"),
+                          label = TRUE)
+
+ggsave(filename = file.path(qc_folder,"04-multiple_0,5-1.jpg"),
+       plot = AS_multi_plot0, device = "jpg", width = 16, height = 16)
+
+ggsave(filename = file.path(qc_folder,"Integration2/04-multiple_0,9-1,4.jpg"),
+       plot = AS_multi_plot1, device = "jpg", width = 16, height = 16)
+
+ggsave(filename = file.path(qc_folder,"Integration2/04-multiple_1,4-1,9.jpg"),
+       plot = AS_multi_plot2, device = "jpg", width = 16, height = 16)
+
+tapply(sc_AS$nFeature_RNA, sc_AS$integrated_snn_res.0.8, summary)
+tapply(sc_AS$mitoRatio, sc_AS$integrated_snn_res.0.8, summary)
+```
+
+
+```{r}
+
+sc_AS <- FindClusters(sc_AS, verbose = FALSE, resolution = 0.8)
+DefaultAssay(object = sc_AS) <- "RNA"
+sc_AS <- NormalizeData(sc_AS, assay = "RNA")
+gc()
+
+sc_AS <- SetIdent(object = sc_AS, value = "integrated_snn_res.0.8")
+sc_cluster_markers <- FindAllMarkers(sc_AS, assay = "RNA", min.pct = 0.3)
+write.csv(sc_cluster_markers,
+          file = file.path(output_folder,"markers_integrated_cluster_0.8.csv"))
+```
+
+
+
+27: Maybe are MAIT cells +++ CD161 and alpha t cell receptor
+
+```{r}
+sc_cluster_markers <- sc_cluster_markers %>%
+    left_join(y = unique(annotations[, c("gene_name", "description")]),
+               by = c("gene" = "gene_name"))
+write.csv(x = sc_cluster_markers,
+          file = "markers_integrated_cluster_0.8_annoted.csv")
+
+
+umap1 <- DimPlot(object = sc_AS, group.by = "Treatment_stage")
+umap2 <- DimPlot(object = sc_AS, group.by = "cell_type_AS", label = TRUE)
+umap3 <- DimPlot(object = sc_AS, group.by = "integrated_snn_res.0.8", 
+                 label = TRUE)
+umap4 <- FeaturePlot(object = sc_AS,
+                     features = "nFeature_RNA",
+                     max.cutoff = "q95", min.cutoff = "q5")
+
+multi_umap <- ggarrange(umap1, umap2, umap3, umap4, ncol = 2, nrow = 2)
+ggsave(filename = file.path(qc_folder,"04-multi_umap.svg"),
+       device = "svg", width = 16, height = 16, dpi = 320)
+
+vln_plot <- dittoBarPlot(object = sc_AS,
+                         group.by = "integrated_snn_res.0.8", var = "Patient")
+ggsave(filename = file.path(qc_folder,"barplot_cell_type.svg"),
+       device = "svg", dpi = 320)
+
+TS_plot <- dittoBarPlot(object = sc_AS,
+                        group.by = "integrated_snn_res.0.8",
+                        var = "Treatment_stage")
+ggsave(filename = file.path(qc_folder,"barplot_TS_plot.svg"),
+       plot = TS_plot, device = "svg", dpi = 320)
+
+```
+
+### Inmune cluster
+
+7: Double negative T cells, CD3+, TCRalpha and beta + but - in CD4 and CD8.
+Double-negative (DN) T cells express the αβ T cell receptor (TCR) but do not express CD4, CD8, or natural killer (NK) cell markers.
+8: CD8+ cells
+9: NKs
+12: NKs
+18: Cytotoxic NKs, they are FGFBP2 and GZMH
+27: MAIT T cells, they are LST1+, IL23R, KLRB1, and TCRab + [https://www.frontiersin.org/articles/10.3389/fimmu.2020.01691/full](HERE describe a gene signature for MAIT cells)
+31: Remmanent of LQ cells
+
+```{r}
+cluster_inmune <- c(7,8,18,9,12,27)
+
+sc_cluster_markers %>%
+    group_by(cluster) %>%
+    top_n(n = 30, wt = avg_log2FC) -> top30_inmune
+
+top30_inmune <- top30_inmune[which(top30_inmune$cluster %in% cluster_inmune),]
+dot_inmune <- DotPlot(object =
+                        sc_AS[,which(sc_AS$integrated_snn_res.0.8 %in%
+                                       cluster_inmune)], assay = "RNA",
+                      features = unique(top30_inmune$gene),
+                      group.by = "integrated_snn_res.0.8",
+                      cols = "RdYlBu") +
+  theme(axis.text.x = element_text(angle = 75, vjust = 1, hjust = 1)) +
+  NoLegend()
+
+ggsave(filename = file.path(qc_folder,"dotplot_inmmune_res08.svg"),
+       plot = dot_inmune, device = "svg", dpi = 320, width = 24, height = 4)
+```
+
+
+### Epithelial cluster
+
+5: Epi SCGB1D2 +
+11: EPi predominant present in the patient 13 in post treatment stage
+19: EPi MUC1 +
+23: Epithelial MUC1 +
+24: Epi
+
+```{r}
+cluster_epi <- c(5,11,19,23,24)
+
+sc_cluster_markers %>%
+    group_by(cluster) %>%
+    top_n(n = 30, wt = avg_log2FC) -> top30_epi
+
+top30_epi <- top30_epi[which(top30_epi$cluster %in% cluster_epi),]
+dot_epi <- DotPlot(object =
+                     sc_AS[,which(sc_AS$integrated_snn_res.0.8 %in%
+                                    cluster_epi)], assay = "RNA",
+                   features = unique(top30_epi$gene),
+                   group.by = "integrated_snn_res.0.8",
+                   cols = "RdYlBu") +
+  theme(axis.text.x = element_text(angle = 75, vjust = 1, hjust = 1)) +
+  NoLegend()
+ggsave(filename = file.path(qc_folder,"dotplot_epi_res08.svg"),
+       plot = dot_epi, device = "svg", dpi = 320, width = 24, height = 4)
+
+
+```
+
+
+
+### Stromal cluster
+
+26: Basal fibroblast, they are C7+
+
+
+```{r}
+cluster_stromal <- c(0,1,2,3,4,14,22,26,28)
+
+sc_cluster_markers %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC) -> top30_stromal
+
+top30_stromal <- top30_stromal[which(top30_stromal$cluster %in%
+                                       cluster_stromal),]
+dot_stromal <- DotPlot(object =
+                         sc_AS[,which(sc_AS$integrated_snn_res.0.8 %in%
+                                        cluster_stromal)], assay = "RNA",
+                       features = unique(top30_stromal$gene),
+                       group.by = "integrated_snn_res.0.8",
+                       cols = "RdYlBu") +
+  theme(axis.text.x = element_text(angle = 75, vjust = 1, hjust = 1)) +
+  NoLegend()
+ggsave(filename = file.path(qc_folder,"dotplot_stromal_res08.svg"),
+       plot = dot_stromal, device = "svg", dpi = 320, width = 24, height = 4)
+
+
+```
+
+
+## Cell relabeling
+
+
+```{r}
+cell_type_final <- sc_AS$cell_type_AS
+cell_type_final[which(sc_AS$integrated_snn_res.0.8 == 27)] <- "MAIT cells"
+cell_type_final[which(sc_AS$integrated_snn_res.0.8 == 24)] <- "Epithelium_SLPI"
+cell_type_final[which(sc_AS$integrated_snn_res.0.8 == 26)] <- "Stromal"
+cell_type_final[which(sc_AS$integrated_snn_res.0.8 == 28)] <- "Stromal"
+cell_type_final[which(sc_AS$integrated_snn_res.0.8 == 22)] <- "Cycling cells"
+cell_type_final[which(sc_AS$integrated_snn_res.0.8 == 8)] <- "CD8+ T cells"
+cell_type_final[which(sc_AS$integrated_snn_res.0.8 == 7)] <- "DN T cells"
+
+sc_AS$cell_type_final_AS <- cell_type_final
+DimPlot(object = sc_AS, group.by = "cell_type_final_AS", label = TRUE)
+```
+
+
+```{r}
+DefaultAssay(object = sc_AS) <- "RNA"
+sc_AS <- NormalizeData(sc_AS, assay = "RNA")
+cluster_cell_treatment <- paste(sc_AS$Treatment_stage,
+                                sc_AS$cell_type_final_AS, sep = "_")
+sc_AS <- AddMetaData(object = sc_AS, metadata = cluster_cell_treatment,
+                     col.name = "Cell_type_treatment")
+
+sc_AS <- SetIdent(object = sc_AS, value = "Cell_type_treatment")
+
+pre_ident.1 <- unique(sc_AS$Cell_type_treatment[which(sc_AS$Treatment_stage ==
+                                                        "A-Pre")])
+post_ident.2 <- unique(sc_AS$Cell_type_treatment[which(sc_AS$Treatment_stage ==
+                                                         "B-Post")])
+
+pre_ident.1 <- pre_ident.1[order(pre_ident.1)]
+post_ident.2 <- post_ident.2[order(post_ident.2)]
+
+idents_merger <- t(rbind(pre_ident.1, post_ident.2))
+idents_merger <- split(idents_merger, seq(nrow(idents_merger)))
+
+
+diffexp_conditions <- function(ident_list, seurat = sc_AS, annotation_df =
+                                 annotations){
+ 
+  markers_df <- FindMarkers(seurat, ident.1 = ident_list[1], ident.2 =
+                              ident_list[2], assay = "RNA", min.pct = 0.25)
+  markers_df$diffexp <- rep(paste(ident_list[1], "-vs-",ident_list[2],
+                                  collapse = "", sep = ""), nrow(markers_df))
+  markers_df <- markers_df[which(markers_df$p_val_adj < 0.05),]
+markers_df <- markers_df %>%
+rownames_to_column(var = "gene") %>%
+    left_join(y = unique(annotation_df[, c("gene_name", "description")]),
+               by = c("gene" = "gene_name"))
+  return(markers_df)
+ 
+}
+
+diffexp_conditions_all <- function(ident_list, seurat = sc_AS,
+                                   annotations = annotations){
+ 
+  markers_df <- FindMarkers(seurat, ident.1 = ident_list[1],
+                            ident.2 = ident_list[2], assay = "RNA")
+  markers_df$diffexp <- rep(paste(ident_list[1], "-vs-",
+                                  ident_list[2], collapse = "", sep = ""),
+                            nrow(markers_df))
+markers_df <- markers_df %>%
+rownames_to_column(var = "gene") %>%
+    left_join(y = unique(annotation_df[, c("gene_name", "description")]),
+               by = c("gene" = "gene_name"))
+  return(markers_df)
+ 
+  }
+
+
+sc_conditions_cell_type_markers <- purrr::map_dfr(idents_merger,
+                                                  diffexp_conditions)
+
+sc_conditions_cell_type_markers <- sc_conditions_cell_type_markers[
+  which(!sc_conditions_cell_type_markers$gene %in% c("HBA2","HBB") ), ]
+
+sc_conditions_cell_type_markers_MAST_latent <-
+  purrr::map_dfr(idents_merger, diffexp_conditions)
+
+
+write.csv(x = sc_conditions_cell_type_markers, file = "cell_type_DE_res_08.csv")
+
+# Fix Annotation
+cell_type_AS_v2 <- sc_AS$cell_type_final_AS
+cell_type_AS_v2[which(sc_AS$integrated_snn_res.0.8 == 6)] <- "Perivascular"
+cell_type_AS_v2[which(sc_AS$integrated_snn_res.0.8 == 15)] <- "Myofibroblasts"
+cell_type_AS_v2[which(sc_AS$integrated_snn_res.0.8 == 17)] <- "SMC_ACTG2"
+sc_AS$cell_type_AS_FINAL_v2 <- cell_type_AS_v2
+sc_AS <- sc_AS[,sc_AS$cell_type_AS_FINAL_v2 != "T cells"]
+
+
+## Save processed Seurat object
+SaveH5Seurat(
+  object = sc_AS,
+  filename = file.path(output_folder,config$annotation_data$file))
+
+
+## PLOTS
+# Fix Annotation Again
+cell_types <- sc_AS$cell_type_AS_FINAL_v2
+cell_types[which(cell_types == "Myofibroblasts")] <- "Contractile PV"
+cell_types[which(cell_types == "Epithelium_SLPI")] <- "AS Epithelium"
+cell_types[which(cell_types == "SMC_ACTG2")] <- "SMC"
+sc_AS$cell_type_AS_FINAL_v3 <- cell_types
+
+
+sc_AS$Treatment_stage[which(sc_AS$Treatment_stage == "A-Pre")] <- " AS-Pre"
+sc_AS$Treatment_stage[which(sc_AS$Treatment_stage == "B-Post")] <- "AS-Post"
+
+
+umap <- DimPlot(object = sc_AS,
+                group.by = "cell_type_AS_FINAL_v3",
+                split.by = "Treatment_stage",
+                raster = TRUE,
+                label = TRUE,
+                pt.size = 2.5,
+                label.size = 4,
+                raster.dpi = c(1024,1024),
+                repel = TRUE) + ggtitle("")
+
+ggsave(filename = file.path(qc_folder,"Integration2_split.svg"),
+       dpi = 320, device = "svg", plot = umap,
+       width = 15, height = 8, fix_text_size = FALSE)
+
+
+umap <- DimPlot(object = sc_AS,
+                group.by = "Treatment_stage",
+                raster = TRUE,
+                label = FALSE,
+                pt.size = 1.5,
+                label.size = 3,
+                raster.dpi = c(1024,1024),
+                repel = TRUE) + ggtitle("")
+
+ggsave(filename = file.path(qc_folder,"Integration2_t.svg"),
+       dpi = 320, device = "svg", plot = umap, width = 9,
+       height = 8, fix_text_size = FALSE)
+
+
+
+```
+
+### Cell ratio patient
+
+```{r, fig.width=6, fig.height=8}
+
+ditto <- dittoBarPlot(object = sc_AS, group.by = "Patient",
+                      var = "Treatment_stage",
+                      scale = "count", color.panel = c("#F8766D", "#00BFC4")) +
+  ggtitle("Number of cells in each patient per treatment stage")
+ggsave(filename = file.path(qc_folder,"barplot.svg"),
+       dpi = 320, device = "svg", plot = ditto, width = 6, height = 4,
+       fix_text_size = FALSE)
+
+```
+
+
+
+

@@ -1,0 +1,261 @@
+---
+title: "02_integration_org"
+output: html_document
+date: "2023-03-07"
+---
+
+<!--
+#-------------------------------------------------------------------------------
+# This script performs several actions in order to perform a 
+# first step filtering:
+# - Calculate Cycle Score
+# - Integrate the data using SCT approach
+# - Dimensional reduction and clusterization
+# - Filter out cells based on low quality clustering
+
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2023-03-07
+#-------------------------------------------------------------------------------
+# Former 02_integration_Bender_Org.Rmd
+-->
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align = "center", 
+                      out.width = "95%", out.width = 3160, fig.width = 12, 
+                      fig.height = 10)
+```
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(SeuratObject)
+library(ggplot2)
+library(scales)
+library(ggpubr)
+library(patchwork)
+library(reshape2)
+library(dplyr)
+library(yaml)
+library(this.path)
+options(bitmapType = "cairo")
+
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+config <- yaml.load_file(find_config())
+
+
+## Count matrices processed and filtered (h5seurat format)
+input_folder <- config$processed_data$dir
+
+## H5seurat object with all data ans metadata
+output_folder_1 <- config$integration_1_data$dir
+dir.create(path = output_folder_1, recursive = TRUE, showWarnings = FALSE)
+
+output_folder_2 <- config$integration_2_data$dir
+dir.create(path = output_folder_2, recursive = TRUE, showWarnings = FALSE)
+
+qc_dir <- config$integration_2_data$qc_dir
+dir.create(path = qc_dir, recursive = TRUE, showWarnings = FALSE)
+
+## Load 
+sc_AS_org <- LoadH5Seurat(
+               file = file.path(config$processed_data$dir,
+                                  config$processed_data$file))
+
+```
+
+## Some Plots
+
+```{r he    }
+sc_AS_org <- NormalizeData(sc_AS_org)
+vln_plot <- VlnPlot(object = sc_AS_org, 
+                    features = "nFeature_RNA", group.by = "Group", 
+                    log = TRUE, pt.size = 0)
+mito_plot <- VlnPlot(object = sc_AS_org, 
+                     features = "mitoRatio", group.by = "Group", 
+                     log = TRUE, pt.size = 0)
+count_plot <- VlnPlot(object = sc_AS_org, 
+                      features = "nCount_RNA", group.by = "Group", 
+                      log = TRUE, pt.size = 0)
+
+vln_plot + mito_plot + count_plot
+```
+
+
+## Cell Cycle Scoring (Phase) calculation
+
+```{r}
+s_genes <- c('UBR7','RFC2','RAD51','MCM2','TIPIN','MCM6','UNG','POLD3','WDR76',
+             'CLSPN','CDC45','CDC6','MSH2','MCM5','POLA1','MCM4','RAD51AP1',
+             'GMNN','RPA2','CASP8AP2','HELLS','E2F8','GINS2','PCNA','NASP',
+             'BRIP1','DSCC1','DTL','CDCA7','CENPU','ATAD2','CHAF1B','USP1',
+             'SLBP','RRM1','FEN1','RRM2','EXO1','CCNE2','BLM','PRIM1','UHRF1')
+g2m_genes <- c('NCAPD2','ANLN','TACC3','HMMR','GTSE1','NDC80','AURKA','TPX2',
+               'BIRC5','G2E3','CBX5','RANGAP1','CTCF','CDCA3','TTK','SMC4',
+               'ECT2','CENPA','CDC20','NEK2','CENPF','HJURP','CKS2','DLGAP5',
+               'PIMREG','TOP2A','PSRC1','CDCA8','CKAP2','NUSAP1','KIF23',
+               'KIF11','KIF20B','CENPE','GAS2L3','KIF2C','NUF2','ANP32E',
+               'LBR','MKI67','CCNB2','CDC25C','HMGB2','CKAP2L','BUB1','CDK1',
+               'CKS1B','UBE2C','CKAP5','AURKB','CDCA2','TUBB4B','JPT1')
+
+sc_AS_org <- CellCycleScoring(object = sc_AS_org, s.features = s_genes,
+                              g2m.features = g2m_genes)
+sc_AS_org$cc_Phase <- sc_AS_org$Phase
+sc_AS_org$Phase <- sc_AS_org$S.Score - sc_AS_org$G2M.Score
+```
+
+
+## Add metadata
+```{r}
+Group_simple <- sc_AS_org$Group
+Group_simple <- gsub(pattern = "LH+8|LH+7", replacement = "Control",
+                     x = Group_simple)
+sc_AS_org$Group_simple <- Group_simple
+```
+
+
+## First Integration
+
+
+```{r}
+sc_AS_lineage_list <- SplitObject(sc_AS_org, split.by = "Group_simple")
+
+# normalize and identify variable features for each dataset independently
+  sc_AS_lineage_list <- lapply(
+      X = sc_AS_lineage_list, 
+      function(x){SCTransform(object = x, 
+                              vars.to.regress = c("mitoRatio","Phase"), 
+                              conserve.memory = T, variable.features.n = 750)})
+
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = sc_AS_lineage_list, 
+                                      nfeatures = 750)
+sc_AS_lineage_list <- PrepSCTIntegration(object.list = sc_AS_lineage_list, 
+                                         anchor.features = features)
+sc_AS.anchors <- FindIntegrationAnchors(object.list = 
+                                            sc_AS_lineage_list, 
+                                        normalization.method = "SCT", 
+                                        anchor.features = features)
+sc_AS_lineage_list_integrated <- IntegrateData(anchorset = sc_AS.anchors, 
+                                               normalization.method = "SCT")
+# Run the standard workflow for visualization and clustering
+sc_AS_lineage_list_integrated <- RunPCA(sc_AS_lineage_list_integrated, 
+                                        npcs = 30,  verbose = FALSE)
+sc_AS_lineage_list_integrated <- RunUMAP(sc_AS_lineage_list_integrated, 
+                                         reduction = "pca", dims = 1:30)
+sc_AS_lineage_list_integrated <- FindNeighbors(sc_AS_lineage_list_integrated, 
+                                               reduction = "pca", dims = 1:30)
+sc_AS_lineage_list_integrated <- FindClusters(sc_AS_lineage_list_integrated, 
+                                              resolution = 0.5)
+
+DimPlot(object = sc_AS_lineage_list_integrated, 
+        group.by = "seurat_clusters", label = TRUE)
+
+## Save processed Seurat object
+SaveH5Seurat(object = sc_AS_lineage_list_integrated, 
+             filename = file.path(output_folder_1,
+                                  config$integration_1_data$file),
+             overwrite = TRUE)
+
+sc_AS_lineage_list_integrated <- SetIdent(
+    object = sc_AS_lineage_list_integrated, value = "seurat_clusters")
+sc_markers_main_types <- FindAllMarkers(
+    object = sc_AS_lineage_list_integrated, assay = "RNA", min.pct = 0.3)
+write.csv(x = sc_markers_main_types, 
+          file = file.path(qc_dir,
+                           "02_organodis_0.5_res_markers.csv"))
+
+
+```
+
+
+```{r}
+umap_1 <- DimPlot(object = sc_AS_lineage_list_integrated, 
+                  group.by = "seurat_clusters", label = TRUE)
+vln_2 <- VlnPlot(object = sc_AS_lineage_list_integrated, 
+                 group.by = "seurat_clusters", 
+                 features = "nFeature_RNA", log = TRUE, pt.size = 0) + 
+  NoLegend()
+vln_3 <- VlnPlot(object = sc_AS_lineage_list_integrated, 
+                 group.by = "seurat_clusters", 
+                 features = "mitoRatio", log = FALSE, pt.size = 0) + NoLegend()
+bar1 <- dittoSeq::dittoBarPlot(
+    object = sc_AS_lineage_list_integrated, 
+    group.by = "seurat_clusters", var = "Group_simple")
+
+multi_plot <- (umap_1 + bar1) / (vln_2 + vln_3)
+```
+
+Removing following clusters
+
+0: Low genes detected and composed by AS-Post
+1: Low genes detected and composed by LH+8
+9: MitoRatio high
+
+
+```{r}
+table_pre_fil <- table(sc_AS_lineage_list_integrated$Group_simple)
+sc_AS_lineage_list_integrated_flit <- 
+    sc_AS_lineage_list_integrated[, 
+                         which(!(sc_AS_lineage_list_integrated$seurat_clusters 
+                                          %in% c(0,9,1)))]
+table_post_fil <- table(sc_AS_lineage_list_integrated_flit$Group_simple)
+vln_2_post <- VlnPlot(
+    object = sc_AS_lineage_list_integrated_flit, 
+    group.by = "Group_simple", features = "nFeature_RNA", 
+    log = TRUE, pt.size = 0) + NoLegend()
+
+# Load Cannonical markers from Wang et al. 2020, 
+# García-Alonso et al. 2021, Phoebe et al. 2023 
+# Tan et al. 2022
+cannonical_markers <- 
+    read.csv(file = "input/data_markers/CanonicalMarkers_rev_3.csv")
+DotPlot(object = sc_AS_lineage_list_integrated_flit, 
+        group.by = "seurat_clusters", assay = "RNA", 
+        features = cannonical_markers$Gene, cols = "RdYlBu") + coord_flip()
+
+
+## Final plot
+umap_1 <- DimPlot(object = sc_AS_lineage_list_integrated_flit, 
+                  group.by = "seurat_clusters", label = TRUE)
+vln_2 <- VlnPlot(object = sc_AS_lineage_list_integrated_flit, 
+                 group.by = "seurat_clusters", 
+                 features = "nFeature_RNA", log = TRUE, pt.size = 0) + 
+  NoLegend()
+vln_3 <- VlnPlot(object = sc_AS_lineage_list_integrated_flit, 
+                 group.by = "seurat_clusters", 
+                 features = "mitoRatio", log = FALSE, pt.size = 0) + NoLegend()
+bar1 <- dittoSeq::dittoBarPlot(
+    object = sc_AS_lineage_list_integrated_flit, 
+    group.by = "seurat_clusters", var = "Group_simple")
+
+multi_plot <- (umap_1 + bar1) / (vln_2 + vln_3)
+ggsave(
+  filename = file.path(qc_dir,"org_multi.svg"), 
+       plot = multi_plot, device = "svg", width = 10, height = 10)
+
+
+## Save processed Seurat object
+SaveH5Seurat(object = sc_AS_lineage_list_integrated_flit, 
+             filename = file.path(output_folder_2,
+                                  config$integration_2_data$file), 
+             overwrite = TRUE)
+
+```

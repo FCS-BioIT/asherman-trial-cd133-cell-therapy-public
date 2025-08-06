@@ -1,0 +1,35 @@
+get_hq_barcodes:
+  input_dataset1_h5seurat: "nuevos_datasets/GSE215968_sc_AS_pre_vs_post.h5seurat"
+  input_dataset2_h5ad: "nuevos_datasets/GSE215968_sc_CD133.h5ad"
+  input_dataset2: "nuevos_datasets/GSE215968_sc_CD133.h5seurat"
+  output_tables_dir: "nuevos_datasets"
+
+explore_variants:
+  input_variants_table_path: "analysis/13_tablas_variantes"
+  input_sc_seurat_data: "GSE215968/AS_pre_post.H5Seurat"
+  output_plots_variants_path: "plots/variants"
+  output_plots_path: "plots"
+
+  informative_variants_parameters:
+    minimum_clone_size: 5  # y, (e.g. 50)
+    minimum_vaf: 0.10 # x, (e.g. 0.50)
+    vaf_2: 0 # w, (e.g., 0.01)
+    popul_percent: 0.10 # z, (e.g. 0.75)
+
+  analysis_1:
+    patient: "115"
+    samples: ["CD133", "entire_E1", "entire_E2", "entire_S1", "entire_S2"]
+    input_trace_E2_table: "trazado_tipos_celulares/conteo_cell_types_115_E2_HQcb.csv"
+    input_trace_S2_table: "trazado_tipos_celulares/conteo_cell_types_115_S2_HQcb.csv"
+
+  analysis_2:
+    patient: "109"
+    samples: ["CD133", "entire_E1", "entire_E2", "entire_S1", "entire_S2"]
+    input_trace_E2_table: "trazado_tipos_celulares/conteo_cell_types_109_E2_HQcb.csv"
+    input_trace_S2_table: "trazado_tipos_celulares/conteo_cell_types_109_S2_HQcb.csv"
+
+  analysis_3:
+    patient: "107"
+    samples: ["CD133", "entire_E2", "entire_S1", "entire_S2"]
+    input_trace_E2_table: "trazado_tipos_celulares/conteo_cell_types_107_E2_HQcb.csv"
+    input_trace_S2_table: "trazado_tipos_celulares/conteo_cell_types_107_S2_HQcb.csv"

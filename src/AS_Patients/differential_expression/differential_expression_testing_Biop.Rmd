@@ -1,0 +1,331 @@
+---
+title: "differential expression testing"
+output: html_document
+date: '2022-04-04'
+---
+
+<!--
+#-------------------------------------------------------------------------------
+# This script performs differential expression between cell types and conditions
+# Extended from Santamaria X et al. Nat Commun 14:5890 (2023)
+#
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2022-04-04'
+#-------------------------------------------------------------------------------
+Former: 02_04042022_AS_pre-vs-post_FINAL_ANALYSIS_Rev.Rmd 
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align = "center", 
+                      out.width = "95%", out.width = 3160, fig.width = 12, 
+                      fig.height = 10)
+```
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(tibble)
+library(yaml)
+library(this.path)
+
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+config <- yaml.load_file(find_config())
+
+# Set folders
+input_file <-  config$differential_expression$input_file
+output_folder <- config$differential_expression$output_dir
+
+
+# Load Input Dataset
+sc_AS <- LoadH5Seurat(file = input_file)
+   
+# Load gene annotations
+annotations <- readRDS( config$differential_expression$file_annotations) 
+```
+
+# Diff Expression calculation
+
+```{r}
+library(ggpubr)
+library(reshape2)
+
+
+# Fix some annotations
+sc_AS$Treatment_stage[which(sc_AS$Treatment_stage == "A-Pre")] <- "AS-Pre"
+sc_AS$Treatment_stage[which(sc_AS$Treatment_stage == " AS-Pre")] <- "AS-Pre"
+sc_AS$Treatment_stage[which(sc_AS$Treatment_stage == "B-Post")] <- "AS-Post"
+
+cell_types <- sc_AS$cell_type_AS_FINAL_v2
+cell_types[which(cell_types == "Myofibroblasts")] <- "Contractile PV"
+cell_types[which(cell_types == "Epithelium_SLPI")] <- "AS Epithelium"
+cell_types[which(cell_types == "SMC_ACTG2")] <- "SMC"
+sc_AS$cell_type_AS_FINAL_v3 <- cell_types
+table(sc_AS$cell_type_AS_FINAL_v3)
+```
+
+## Diff. expression
+
+```{r}
+
+## Prepare data
+DefaultAssay(object = sc_AS) <- "RNA"
+sc_AS <- NormalizeData(sc_AS, assay = "RNA")
+cluster_cell_treatment <- paste(sc_AS$Treatment_stage, 
+                                sc_AS$cell_type_AS_FINAL_v3, sep = "_")
+sc_AS <- AddMetaData(object = sc_AS, metadata = cluster_cell_treatment, 
+                     col.name = "Cell_type_treatment")
+
+sc_AS <- SetIdent(object = sc_AS, value = "Cell_type_treatment")
+
+pre_ident.1 <- 
+  unique(sc_AS$Cell_type_treatment[which(sc_AS$Treatment_stage == "AS-Pre")])
+post_ident.2 <- 
+  unique(sc_AS$Cell_type_treatment[which(sc_AS$Treatment_stage == "AS-Post")])
+
+pre_ident.1 <- pre_ident.1[order(pre_ident.1)]
+post_ident.2 <- post_ident.2[order(post_ident.2)]
+
+idents_merger <- t(rbind(pre_ident.1, post_ident.2))
+idents_merger <- split(idents_merger, seq(nrow(idents_merger)))
+
+
+
+# Declare main functions
+diffexp_conditions <- function(ident_list, seurat = sc_AS, 
+                               annotation_df = annotations){
+  
+  markers_df <- FindMarkers(seurat, ident.1 = ident_list[1], 
+                            ident.2 = ident_list[2], 
+                            assay = "RNA", min.pct = 0.25)
+  markers_df$diffexp <- rep(paste(ident_list[1], "-vs-",
+                                  ident_list[2], 
+                                  collapse = "", sep = ""), nrow(markers_df))
+  
+markers_df <- markers_df[which(markers_df$p_val_adj < 0.05),]
+markers_df <- markers_df %>%
+rownames_to_column(var = "gene") %>%
+    left_join(y = unique(annotation_df[, c("gene_name", "description")]),
+               by = c("gene" = "gene_name"))
+  return(markers_df)
+  
+}
+
+diffexp_conditions_all <- function(ident_list, seurat = sc_AS, 
+                                   annotations = annotations){
+  
+  markers_df <- FindMarkers(seurat, ident.1 = ident_list[1], 
+                            ident.2 = ident_list[2], assay = "RNA")
+  markers_df$diffexp <- rep(paste(ident_list[1], "-vs-",
+                                  ident_list[2], 
+                                  collapse = "", sep = ""), nrow(markers_df))
+markers_df <- markers_df %>%
+rownames_to_column(var = "gene") %>%
+    left_join(y = unique(annotation_df[, c("gene_name", "description")]),
+               by = c("gene" = "gene_name"))
+  return(markers_df)
+  
+  }
+
+
+# Perform differential expression testing
+sc_conditions_cell_type_markers <- purrr::map_dfr(idents_merger, 
+                                                  diffexp_conditions)
+# Filter HB genes
+sc_conditions_cell_type_markers <- 
+  sc_conditions_cell_type_markers[which(!sc_conditions_cell_type_markers$gene 
+                                        %in% c("HBA2","HBB") ), ]
+
+## Save results
+write.csv(x = sc_conditions_cell_type_markers, 
+          file = file.path(output_folder,"05042022_cell_type_DE_PRE_POST.csv"))
+```
+
+
+
+
+```{r}
+wilcox_DE <- sc_conditions_cell_type_markers
+
+wilcox_DE <- wilcox_DE[which
+                       (!(wilcox_DE$gene %in% 
+                            c(na.exclude(stringi::stri_extract(
+                              str = wilcox_DE$gene, regex = "MT-.*"))))),]
+
+
+comparations_treatment <- unique(wilcox_DE$diffexp)
+gene_top50 <- vector(mode = "list", length = length(comparations_treatment))
+
+for (comparation in 1:length(gene_top50)) {
+  
+  gene_top50[[comparation]] <-  
+    c(top_n(wilcox_DE[which(wilcox_DE$diffexp == 
+                              comparations_treatment[comparation]),], 
+            n = 25, wt = avg_log2FC)$gene, 
+      top_n(wilcox_DE[which(wilcox_DE$diffexp == 
+                              comparations_treatment[comparation]),], 
+            n = -25, wt = avg_log2FC)$gene)
+  
+}
+
+names(gene_top50) <- comparations_treatment
+gene_top50_unique <- unlist(gene_top50)[!duplicated(unlist(gene_top50))]
+
+dotplot_diff_exp <- vector(mode = "list", length = length(gene_top50))
+
+# Patch to force AS_Pre on the left 
+sc_AS$Treatment_stage[which(sc_AS$Treatment_stage == "AS-Pre")] <- " AS-Pre"
+
+
+for (cell_type in 1:length(dotplot_diff_exp)) {
+  print(names(gene_top50)[cell_type])
+  print(cell_type)
+
+  test_top_genes <- c(top_n(wilcox_DE[which(wilcox_DE$diffexp == 
+                                              names(gene_top50)[cell_type]),], 
+                            n = 25, wt = avg_log2FC)$gene, 
+                      top_n(wilcox_DE[which(wilcox_DE$diffexp == 
+                                              names(gene_top50)[cell_type]),], 
+                            n = -25, wt = avg_log2FC)$gene)
+  
+  dotplot_diff_exp[[cell_type]] <-  
+    DotPlot(
+    object = sc_AS[, which(sc_AS$cell_type_AS_FINAL_v3 == gsub(
+      x = stringr::str_match(string = names(gene_top50)[cell_type], 
+                             pattern = "_.*-vs"), pattern = "^_|-vs", 
+      replacement = "")[1])],
+    group.by = "Treatment_stage", 
+    features = gene_top50[[cell_type]][!duplicated(gene_top50[[cell_type]])], 
+    scale = FALSE, cols = "RdYlBu") + 
+    coord_flip() + 
+    ggtitle(gsub(x = stringr::str_match(string = names(gene_top50)[cell_type], 
+                                        pattern = "_.*-vs"), pattern = "^_|-vs", 
+                 replacement = "")[1]) + ylab("") + xlab("")
+}
+
+
+print(names(gene_top50)[cell_type])
+
+names(dotplot_diff_exp) <- gsub(pattern = "t_", replacement = "", 
+                                x = stringr::str_extract(string = 
+                                                           names(gene_top50), 
+                                                         pattern = "t_.*"))
+
+# Final figures
+
+diff_expression_in <- 
+  ggarrange(
+    plotlist = dotplot_diff_exp[c("Epithelium","Stromal",
+                                  "MAIT cells","Endothelium",
+                                  "Macrophages")], common.legend = TRUE, 
+    nrow = 1, legend = "right", vjust = 1.5)
+
+ggsave(file.path(output_folder,"fig3d.svg"), device = "svg", 
+       width = 17, height = 9, plot = diff_expression_in, dpi = 320, 
+       fix_text_size = FALSE, bg = "white")
+
+
+diff_expression_supp_1 <- 
+  ggarrange(
+    plotlist = dotplot_diff_exp[c("DC","Cytotoxic NK",
+                                  "B cells","CD8+ T cells")], 
+    common.legend = TRUE, nrow = 1, legend = "right", vjust = 1.5)
+
+diff_expression_supp_2 <- ggarrange(plotlist = 
+                                      dotplot_diff_exp[c("DN T cells",
+                                                         "Perivascular",
+                                                         "Endothelium",
+                                                         "Contractile PV")], 
+                                    common.legend = TRUE, nrow = 1, 
+                                    legend = "right", vjust = 1.5)
+
+ggsave(filename = file.path(output_folder,"fig7a_1.svg"), 
+       plot = diff_expression_supp_1, device = "svg", 
+       width = 15, height = 8, dpi = 320, fix_text_size = FALSE, bg = "white")
+ggsave(filename = file.path(output_folder,"fig7a_2.svg"), 
+       plot = diff_expression_supp_2, device = "svg", 
+       width = 15, height = 8, dpi = 320, fix_text_size = FALSE, bg = "white")
+
+
+diff_expression_in <- ggarrange(
+  plotlist = dotplot_diff_exp[c("B cells","CD8+ T cells",
+                                "DN T cells","MAIT cells")], 
+  common.legend = TRUE, nrow = 1, legend = "right", vjust = 1.5)
+
+diff_expression_in2 <- ggarrange(
+  plotlist = dotplot_diff_exp[c("NK","Cytotoxic NK","Macrophages","DC")], 
+  common.legend = TRUE, nrow = 1, legend = "right", vjust = 1.5)
+
+diff_expression_endo <- ggarrange(
+  plotlist = dotplot_diff_exp[c("Epithelium","Ciliated Epithelium","Stromal")],
+  common.legend = TRUE, nrow = 1, legend = "right", vjust = 1.5)
+
+diff_expression_support <- 
+  ggarrange(plotlist = dotplot_diff_exp[c("Perivascular",
+                                          "Endothelium","PV_contractible")], 
+                                     common.legend = TRUE, nrow = 1, 
+                                     legend = "right", vjust = 1.5)
+
+ggsave(filename = file.path(output_folder,"DE_inmune.svg"),
+       plot = diff_expression_in, device = "svg", dpi = 320, 
+       height = 8, width = 16)
+
+ggsave(filename = file.path(output_folder,"DE_inmune2.svg"),
+       plot = diff_expression_in2, device = "svg", dpi = 320, 
+       height = 8, width = 16)
+ggsave(filename = file.path(output_folder,"DE_endo.svg"),
+       plot = diff_expression_endo, device = "svg", dpi = 320, 
+       height = 8, width = 16)
+ggsave(filename = file.path(output_folder,"DE_support.svg"),
+       plot = diff_expression_support, device = "svg", dpi = 320, 
+       height = 8, width = 16)
+dotplot_diff_exp["SMC"]
+
+diff_expression_fig <- ggarrange(
+  plotlist = dotplot_diff_exp[c("Epithelium","Stromal")], 
+  legend = "none", vjust = 1.5)
+diff_expression_fig_2 <- ggarrange(
+  plotlist = dotplot_diff_exp[c("Endothelium","Macrophages")], 
+  legend = "none", vjust = 1.5)
+
+diff_expression_fig_final <- diff_expression_fig/diff_expression_fig_2
+
+ggsave(filename = file.path(output_folder,"DE_figure.svg"),
+       plot = diff_expression_fig_final, device = "svg", 
+       dpi = 320, height = 16, width = 7)
+
+lapply(names(dotplot_diff_exp), function(x){ggsave(
+  filename = file.path(output_folder,paste(,x,"_DE.svg",sep = "")),
+  plot = dotplot_diff_exp[[x]], device = "svg", dpi = 320, 
+  height = 8, width = 6)})
+
+
+ggsave(filename = file.path(output_folder,"smc_DE.svg"), 
+       plot = dotplot_diff_exp[["SMC"]], device = "svg", width = 5, 
+       height = 8, fix_text_size = FALSE)
+
+```
+
+
+
+
+

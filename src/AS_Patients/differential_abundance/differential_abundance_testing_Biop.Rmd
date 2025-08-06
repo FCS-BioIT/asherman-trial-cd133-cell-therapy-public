@@ -1,0 +1,270 @@
+---
+title: "differential abundance testing"
+output: html_document
+date: '2022-04-04'
+---
+
+<!--
+#-------------------------------------------------------------------------------
+# This script performs differential abundance between cell types using edgeR
+# Extended from Santamaria X et al. Nat Commun 14:5890 (2023)
+#
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2022-04-04
+#-------------------------------------------------------------------------------
+Former: 02_04042022_AS_pre-vs-post_FINAL_ANALYSIS_Rev.Rmd 
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align = "center", 
+                      out.width = "95%", out.width = 3160, fig.width = 12, 
+                      fig.height = 10)
+```
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(varhandle)
+library(dplyr)
+library(ggpubr)
+library(reshape2)
+library(ggbreak) 
+library(edgeR)
+library(yaml)
+library(this.path)
+
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+config <- yaml.load_file(find_config())
+
+# Set folders
+input_file <-  config$differential_abundance$input_file
+output_folder <- config$differential_abundance$output_dir
+dir.create(output_folder, recursive = TRUE, showWarnings = FALSE)
+
+# Load Input Dataset
+sc_AS <- LoadH5Seurat(file = input_file)
+   
+
+```
+
+# Abundance calculation
+
+```{r}
+library(ggpubr)
+library(reshape2)
+
+
+# Fix some annotations
+sc_AS$Treatment_stage[which(sc_AS$Treatment_stage == "A-Pre")] <- " AS-Pre"
+sc_AS$Treatment_stage[which(sc_AS$Treatment_stage == "B-Post")] <- "AS-Post"
+
+cell_types <- sc_AS$cell_type_AS_FINAL_v2
+cell_types[which(cell_types == "Myofibroblasts")] <- "PV contractible"
+cell_types[which(cell_types == "Epithelium_SLPI")] <- "Epithelium AS"
+sc_AS$cell_type_AS_FINAL_v3 <- cell_types
+
+
+
+abundances <- table(sc_AS$cell_type_AS_FINAL_v3, sc_AS$orig.ident) 
+abundances <- unclass(abundances) 
+abundances <- abundances[-4,]
+
+
+# Calc abundances 
+abundances <- abundances[,which(colSums(abundances) > 100)]
+abundances <- apply(abundances, MARGIN = 2, function(x){(x/sum(x))*100})
+abundances_melt <- melt(abundances)
+abundances_melt[,"Treatment stage"] <- 
+    sc_AS@meta.data[match(abundances_melt$Var2, 
+                          sc_AS$orig.ident), c("Treatment_stage")]
+
+abundances_ratios_stats <- abundances_melt %>% 
+  group_by(`Treatment stage`,Var1) %>% 
+  summarize(mean = mean(value),
+            sd = sd(value),
+            median = median(value))
+
+
+
+
+
+
+# Save results csv
+write.csv(x = abundances_ratios_stats, 
+            file = file.path(output_folder,"ratios_pre_vs_post.csv"))
+
+ 
+# Save plot results 
+p <- ggboxplot(abundances_melt, x = "Var1", y = "value",
+                color = "Treatment stage", palette = c("#F8766D", "#00BFC4"),
+                add = "jitter", shape = "Treatment stage")
+p <- p + ylab("Cell ratios") + xlab("") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1 ))
+ggsave(filename = file.path(output_folder,"DA_1.svg"), 
+       device = "svg", width = 10, height = 6, plot = p)
+
+```
+
+
+
+# Differential abundace testing
+
+```{r}
+
+# ALL CELL TYPES ESTE ES
+abundances <- table(sc_AS$cell_type_AS_FINAL_v3, sc_AS$orig.ident) 
+abundances <- unclass(abundances) 
+abundances <- abundances[-4,]
+
+abundances <- abundances[,which(colSums(abundances) > 100)]
+extra.info <- sc_AS@meta.data
+extra.info <- extra.info[match(
+  colnames(abundances), sc_AS$orig.ident),
+  c("Treatment_stage","Patient","orig.ident","Cell_type")]
+row.names(extra.info) <- extra.info$orig.ident
+
+
+y.ab <- DGEList(abundances, samples = extra.info)
+
+design <- model.matrix(~ factor(Cell_type) + 
+                         factor(Treatment_stage) , y.ab$samples)
+
+y.ab <- estimateDisp(y.ab, design)
+summary(y.ab$common.dispersion)
+plotBCV(y.ab, cex = 1)
+fit.ab <- glmQLFit(y.ab, design, robust = TRUE, abundance.trend = FALSE)
+summary(fit.ab$var.prior)
+summary(fit.ab$df.prior)
+plotQLDisp(fit.ab, cex = 1)
+res100 <- glmQLFTest(fit.ab, coef = ncol(design))
+topTags(res100, n = 15,adjust.method = "fdr")
+
+stats.test <- topTags(res100, n = 15,adjust.method = "fdr")
+
+# Save results csv
+write.csv(x = stats.test, 
+            file = file.path(output_folder,"statistical_test_pre_vs_post.csv"))
+
+```
+
+
+
+```{r}
+
+## Change Epithelium AS title for some plots
+cell_types <- as.character(abundances_melt$Var1)
+table(cell_types)
+
+cell_types[which(cell_types == "Epithelium AS")] <- "AS Epithelium"
+
+abundances_melt$Var1 <- cell_types 
+table(cell_types)
+
+
+## Global
+p <- ggboxplot(abundances_melt, x = "Treatment stage", y = "value",
+                color = "Treatment stage", palette = c("#F8766D", "#00BFC4"),
+                add = "jitter", shape = "Treatment stage")
+p <- p + xlab("Treatment stage") + ylab("Cell ratios") + 
+  facet_wrap(~ Var1, scales = "free_y") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+        strip.text.x = element_text(size = 12, face = "bold"))
+ggsave(filename = file.path(output_folder,"DA_2.svg"), device = "svg", 
+       dpi = 320, width = 10, height = 10, plot = p)
+
+
+## Supp Global
+
+abundances_melt_n <- 
+  abundances_melt[which(!(abundances_melt$Var1 %in% 
+                            c("AS Epithelium", "Macrophages"))),]
+
+p <- ggboxplot(abundances_melt_n, x = "Treatment stage", y = "value",
+                color = "Treatment stage", palette = c("#F8766D", "#00BFC4"),
+                add = "jitter", shape = "Treatment stage")
+p <- p + xlab("Treatment stage") + ylab("Cell ratios") + 
+  facet_wrap(~ Var1, scales = "free_y", ncol = 5, nrow = 3) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+        strip.text.x = element_text(size = 12, face = "bold"))
+
+
+ggsave(filename = file.path(output_folder,"DA_3.svg"), plot = p, 
+       device = "svg", width = 12, height = 7, dpi = 320, fix_text_size = FALSE)
+
+
+
+## Dot plot
+
+
+
+table(abundances_melt$Var1)
+abundances_melt_v2 <- abundances_melt[which(abundances_melt$Var1 %in% 
+                                          c("AS Epithelium","Macrophages")), ]
+
+
+
+
+abundances_melt_v2_as <- abundances_melt_v2[which(abundances_melt_v2$Var1 == 
+                                                    "AS Epithelium"),]
+abundances_melt_v2_as$Title <- "AS Epithelium"
+
+as_box <- ggplot(data = abundances_melt_v2_as, aes(
+  x = `Treatment stage`,color = `Treatment stage`, y = value)) + 
+  geom_boxplot() + geom_point(aes(shape = `Treatment stage`)) +
+  scale_y_break(c(1, 40), scales = 0.2) + facet_wrap(~ Title) +
+  ggpubr::theme_pubr() + NoLegend()
+
+abundances_melt_v2_as <- abundances_melt_v2[which(abundances_melt_v2$Var1 ==
+                                                    "Macrophages"),]
+abundances_melt_v2_as$Title <- "Macrophages"
+
+macro_box <- ggplot(data = abundances_melt_v2_as, aes(
+  x = `Treatment stage`,color = `Treatment stage`, y = value)) + 
+  geom_boxplot(outlier.size = 0) + geom_point(aes(shape = `Treatment stage`)) +
+  scale_y_break(c(15, 40), scales = 0.2) + facet_wrap(~ Title) + 
+  ggpubr::theme_pubr() + NoLegend()
+
+
+library(patchwork)
+multi_plot <- as_box + macro_box
+ggsave(filename = file.path(output_folder,"DA_4.svg"), 
+       plot = multi_plot, device = "svg", width = 6, height = 4, 
+       dpi = 320, fix_text_size = FALSE)
+
+macro_box_legend <- ggplot(data = abundances_melt_v2_as, 
+                           aes(x = `Treatment stage`,
+                               color = `Treatment stage`, 
+                               y = value, shape = `Treatment stage`)) + 
+  geom_boxplot() + geom_point(aes(shape = `Treatment stage`)) + 
+  scale_y_break(c(15, 40), scales = 0.2) + facet_wrap(~ Title) + 
+  ggpubr::theme_pubr()
+
+ggsave(filename = file.path(output_folder,"DA_4_le.svg"), 
+       plot = macro_box_legend, device = "svg", width = 6, height = 4, 
+       dpi = 320, fix_text_size = FALSE)
+
+
+
+
+```
+
+
+

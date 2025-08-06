@@ -1,0 +1,289 @@
+---
+title: "04_Integration3_Org"
+output: html_document
+date: "2023-03-07"
+
+---
+
+<!--
+#-------------------------------------------------------------------------------
+# This script performs several steps:
+# - Filters out LH+8 sample 
+# - Performs the integration pipeline again using SCT approach
+# - And dimensional reduction and clusterization
+
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2023-03-07
+#-------------------------------------------------------------------------------
+# Former 05_final_analysis_org.Rmd
+-->
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(SeuratObject)
+library(ggplot2)
+library(scales)
+library(ggpubr)
+library(patchwork)
+library(reshape2)
+library(dplyr)
+library(DelayedArray)
+library(ComplexHeatmap)
+library(yaml)
+library(this.path)
+options(bitmapType="cairo")
+
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+config <- yaml.load_file(find_config())
+
+
+
+## ouput H5seurat object folder
+output_folder <- config$integration_4_data$dir
+dir.create(path = output_folder, recursive = TRUE, showWarnings = FALSE)
+
+qc_dir <- config$integration_4_data$qc_dir
+dir.create(path = qc_dir, recursive = TRUE, showWarnings = FALSE)
+
+
+# Load input Seurat Object
+sc_AS_org <- LoadH5Seurat(
+  file = file.path(config$integration_3_data$dir,
+                   config$integration_3_data$file))
+
+annotations <- readRDS(
+      file = config$integration_4_data$file_annotations)
+
+```
+
+
+```{r, fig.width=12, fig.height=12}
+umap1_cell_Types <- DimPlot(object = sc_AS_org, 
+                            group.by = "cell_type_manual_org", 
+                            split.by = "orig_id_filt", ncol = 3, label = TRUE)
+barplot_cell_num <- dittoSeq::dittoBarPlot(object = sc_AS_org, 
+                                           group.by = "orig_id_filt", 
+                                           var = "cell_type_manual_org", 
+                                           scale = "count", split.by = "Group") 
+print(umap1_cell_Types)
+print(barplot_cell_num)
+```
+
+
+Removing LH+8 sample 
+
+```{r}
+sc_AS_org_LH7 <- sc_AS_org[,which(
+    sc_AS_org$orig_id_filt != "MASCE-15-tto_ASHERMAN")] 
+
+sc_AS_lineage_list <- SplitObject(sc_AS_org_LH7, split.by = "Group")
+
+# normalize and identify variable features for each dataset independently
+  sc_AS_lineage_list <- 
+      lapply(X = sc_AS_lineage_list, 
+             function(x){SCTransform(object = x, 
+                                     vars.to.regress = c("mitoRatio","Phase"), 
+                                     conserve.memory = TRUE, 
+                                     variable.features.n = 750)})
+
+# select features that are repeatedly variable across datasets for integration
+  features <- SelectIntegrationFeatures(object.list = sc_AS_lineage_list, 
+                                        nfeatures = 750)
+  
+  sc_AS_lineage_list <- PrepSCTIntegration(object.list = sc_AS_lineage_list, 
+                                           anchor.features = features)
+  
+  sc_AS.anchors <- FindIntegrationAnchors(object.list = sc_AS_lineage_list, 
+                                          normalization.method = "SCT", 
+                                          anchor.features = features)
+  
+  sc_AS_lineage_list_integrated <- IntegrateData(anchorset = sc_AS.anchors,
+                                                 normalization.method = "SCT")
+  
+# Run the standard workflow for visualization and clustering
+  sc_AS_lineage_list_integrated <- RunPCA(sc_AS_lineage_list_integrated, 
+                                          npcs = 30,  verbose = FALSE)
+  
+  sc_AS_lineage_list_integrated <- RunUMAP(sc_AS_lineage_list_integrated, 
+                                           reduction = "pca", dims = 1:30)
+  
+  sc_AS_lineage_list_integrated <- FindNeighbors(sc_AS_lineage_list_integrated, 
+                                                 reduction = "pca", dims = 1:30)
+  
+  sc_AS_lineage_list_integrated <- FindClusters(sc_AS_lineage_list_integrated, 
+                                                resolution = 0.5)
+
+```
+
+
+
+```{r}
+DefaultAssay(sc_AS_lineage_list_integrated) <- "RNA"
+sc_AS_lineage_list_integrated <- NormalizeData(sc_AS_lineage_list_integrated)
+```
+
+
+```{r}
+umap_seurat_final <- DimPlot(object = sc_AS_lineage_list_integrated, 
+                             label = TRUE)
+
+umap_cell_id <- DimPlot(object = sc_AS_lineage_list_integrated, 
+                        group.by = "cell_type_manual_org", label = TRUE)
+
+DefaultAssay(sc_AS_lineage_list_integrated) <- "RNA"
+sc_AS_lineage_list_integrated <- NormalizeData(sc_AS_lineage_list_integrated)
+
+
+sc_AS_lineage_list_integrated <- SetIdent(
+  object = sc_AS_lineage_list_integrated, value = "seurat_clusters")
+sc_markers_seurat <- FindAllMarkers(object = sc_AS_lineage_list_integrated, 
+                                    assay = "RNA", min.pct = 0.3)
+
+sc_AS_lineage_list_integrated <- SetIdent(
+  object = sc_AS_lineage_list_integrated, value = "cell_type_manual_org")
+sc_markers_mainpop <- FindAllMarkers(object = sc_AS_lineage_list_integrated, 
+                                     assay = "RNA", min.pct = 0.3)
+
+
+sc_markers_mainpop <- sc_markers_mainpop %>%
+    left_join(y = unique(annotations[, c("gene_name", "description")]),
+               by = c("gene" = "gene_name"))
+
+sc_markers_seurat <- sc_markers_seurat %>%
+    left_join(y = unique(annotations[, c("gene_name", "description")]),
+               by = c("gene" = "gene_name"))
+```
+
+```{r}
+
+
+zscore_sc <- function(seurat_obj) {
+  
+  
+  counts <- DelayedArray::DelayedArray(seurat_obj@assays$RNA@data)
+  counts <- 
+    (counts - DelayedMatrixStats::rowMeans2(counts)) / 
+    DelayedMatrixStats::rowSds(counts)
+  
+  counts[base::is.nan(counts)] <- 0
+  return(counts)
+}
+
+sc_markers_seurat %>%
+    group_by(cluster) %>%
+    top_n(n = 5, wt = avg_log2FC) -> top5
+
+
+zscore_seurat <- zscore_sc(sc_AS_lineage_list_integrated)
+cluster_annot <- sc_AS_lineage_list_integrated@meta.data
+zscore_seurat <- zscore_seurat[unique(top5$gene),]
+quantiles_matrix <- quantile(zscore_seurat, c(0.1, 0.95))
+
+col_fun = circlize::colorRamp2(c(quantiles_matrix[1],0,quantiles_matrix[2]), 
+                               c("#FF00FF", "black", "#FFFF00"))
+
+heatmap <- Heatmap(as.matrix(zscore_seurat), name = "z-score",  
+        column_split = factor(cluster_annot[,"seurat_clusters"]),
+        cluster_columns = TRUE,
+        show_column_dend = TRUE,
+        cluster_column_slices = TRUE,
+        column_title_gp = gpar(fontsize = 8),
+        column_gap = unit(0.5, "mm"),
+        cluster_rows = TRUE,
+        show_row_dend = FALSE,
+        col = col_fun,
+        row_names_gp = gpar(fontsize = 4),
+        column_title_rot = 90,
+        top_annotation = HeatmapAnnotation(
+          foo = anno_block(labels_gp = gpar(fontsize = 5),
+                           gp = gpar(fill = scales::hue_pal()(9),
+                                     fontsize = 5))),
+        show_column_names = FALSE,
+        use_raster = TRUE,
+        raster_quality = 4)
+
+svg(
+  filename = file.path(qc_dir,"04-heatmap_test.svg"), 
+  width = 16, height = 10)
+draw(heatmap)
+dev.off()
+
+```
+
+
+
+
+```{r}
+sc_AS_lineage_list_integrated$less_750 <- 
+    sc_AS_lineage_list_integrated$nFeature_RNA < 750
+umap1_clus <- DimPlot(object = sc_AS_lineage_list_integrated, 
+                      group.by = "seurat_clusters", label = TRUE)
+umap1_filt <- DimPlot(object = sc_AS_lineage_list_integrated, 
+                      group.by = "less_750", label = TRUE)
+
+vln_1_rna <- VlnPlot(
+    object = sc_AS_lineage_list_integrated, 
+    features = "nFeature_RNA", 
+    group.by = "orig_id_filt", log = TRUE, pt.size = 0) + NoLegend()
+vln_1_mito <- VlnPlot(
+    object = sc_AS_lineage_list_integrated, 
+    features = "mitoRatio", 
+    group.by = "orig_id_filt", log = TRUE, pt.size = 0) + NoLegend()
+
+barplot_patient <- dittoSeq::dittoBarPlot(
+    object = sc_AS_lineage_list_integrated, 
+    var = "orig_id_filt", group.by = "seurat_clusters") + NoLegend()
+barplot_patient_count <- dittoSeq::dittoBarPlot(
+    object = sc_AS_lineage_list_integrated, 
+    var = "orig_id_filt", group.by = "seurat_clusters", scale = "count")
+
+barplot_filt <- dittoSeq::dittoBarPlot(
+    object = sc_AS_lineage_list_integrated, 
+    var = "orig_id_filt", group.by = "less_750") + NoLegend()
+barplot_filt_count <- dittoSeq::dittoBarPlot(
+    object = sc_AS_lineage_list_integrated, 
+    var = "orig_id_filt", group.by = "less_750", scale = "count")
+
+barplot_filt_count_group <- dittoSeq::dittoBarPlot(
+    object = sc_AS_lineage_list_integrated, 
+    var = "Group", group.by = "less_750", scale = "count") + NoLegend()
+barplot_filt_group <- dittoSeq::dittoBarPlot(
+    object = sc_AS_lineage_list_integrated, 
+    var = "Group", group.by = "less_750")
+
+multi_plot <- ggarrange(vln_1_rna, vln_1_mito, 
+                        barplot_patient, barplot_patient_count, 
+                        barplot_filt, barplot_filt_count, 
+                        barplot_filt_count_group, 
+                        barplot_filt_group, 
+                        ncol = 2, nrow = 4, common.legend = FALSE)
+
+ggsave(filename = file.path(qc_dir,"04_multi_bar_QC.svg"), 
+       plot = multi_plot, height = 16, width = 12, device = "svg")
+ggsave(filename = file.path(qc_dir,"04_umap_filt.svg"), 
+       plot = umap1_filt, width = 6, height = 6, device = "svg")
+
+
+## Save processed Seurat object
+SaveH5Seurat(object = sc_AS_lineage_list_integrated, 
+             filename = file.path(output_folder,
+                   config$integration_4_data$file))
+```
+
+

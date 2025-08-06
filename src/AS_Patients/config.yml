@@ -1,0 +1,60 @@
+raw_data:
+  dir: "input/AS_Patients/data_raw" 
+
+metadata:
+  file: "metadata/SA_patients_metadata.csv"
+  
+qc_parameters:
+  loaded_cells: 17000 # DoubletFinder parameter
+  mito_ratio_filt: 25 # filter low quality cells
+  nfeature_rna_filt: 500 # filter low quality cells
+  qc_plots_dir: "QC_plots" 
+  qc_stats_file: "QC_stats.csv"
+
+filtered_data:
+  dir: "output/AS_Patients/data_filter"
+  qc_dir: "output/AS_Patients/data_filter_qc"
+  sc_file_pattern: "_Filter_AS.H5seurat"
+
+processed_data:
+  dir: "output/AS_Patients/data_processed"
+  file: "01-01032022_AS_SCT_labeled.H5seurat"
+  qc_dir: "output/AS_Patients/data_processed/qc"
+  integration1_dir: "output/AS_Patients/Integration1"
+  nfeature_rna_filt: 750 # filter low quality cells
+
+integration1_data:
+  dir: "output/AS_Patients/data_processed"
+  file: "02-10032022_AS_SLIM_relabeled_filter.H5Seurat"
+  qc_dir: "output/AS_Patients/Integration1"
+   
+integration2_data:
+  dir: "output/AS_Patients/data_processed"
+  file: "03-11032022_AS_integrated.H5Seurat"
+
+annotation_data:
+  dir: "output/AS_Patients/data_processed"
+  file: "04-29032022_AS_PRE_POST_FINAL_ANNOTATION.H5Seurat"
+  qc_dir: "output/AS_Patients/annotation"
+  file_annotations:  "input/annotations/22072021_annotations.rds"
+
+differential_abundance:
+  input_file: "output/AS_Patients/data_processed/04-29032022_AS_PRE_POST_FINAL_ANNOTATION.H5Seurat"
+  output_dir: "output/AS_Patients/differential_abundance"
+
+
+differential_expression:
+  input_file: "output/AS_Patients/data_processed/04-29032022_AS_PRE_POST_FINAL_ANNOTATION.H5Seurat"
+  output_dir: "output/AS_Patients/differential_expression"
+  file_annotations:  "input/annotations/22072021_annotations.rds"
+
+secretory_phase_score:
+  input_file: "output/AS_Patients/data_processed/04-29032022_AS_PRE_POST_FINAL_ANNOTATION.H5Seurat"
+  output_dir: "output/AS_Patients/secretory_phase_score"
+
+
+cell_to_cell_communication:  
+  input_file: "output/AS_Patients/data_processed/04-29032022_AS_PRE_POST_FINAL_ANNOTATION.H5Seurat"
+  output_dir: "output/AS_Patients/cell-to-cell_communication"
+  ccc_file: "28032022_AS_pre-vs-post_batch3_CCC_v2.rds"
+  

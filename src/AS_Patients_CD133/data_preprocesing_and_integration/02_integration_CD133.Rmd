@@ -1,0 +1,109 @@
+---
+title: "02_integration_CD133.Rmd"
+output: html_document
+date: '2022-04-12'
+---
+
+
+<!--
+#-------------------------------------------------------------------------------
+# This script performs several steps:
+# - Integrate the data using SCT approach
+# - Dimensional reduction and clusterization
+
+# Author: Carlos Simon Foundation (Raul PM @supermegamio, Diego AC @diegoamoros)
+# Date: 2022-04-12
+#-------------------------------------------------------------------------------
+# Former 12042022_AS_CD133_integration.Rmd
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      error = FALSE, comment = NA, cache = FALSE,
+                      R.options = list(width = 320), fig.align = "center", 
+                      out.width = "95%", out.width = 3160, fig.width = 12, 
+                      fig.height = 10)
+```
+
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(dittoSeq)
+library(ggpubr)
+library(dplyr)
+library(yaml)
+library(this.path)
+
+## Load config.yml file
+find_config <- function(names = c("config.yaml", "config.yml")) {
+  currrent.path <- dirname(this.path::this.path())
+  dirs <- unique(c(currrent.path, dirname(currrent.path)))
+  for (d in dirs) {
+    for (nm in names) {
+      p <- file.path(d, nm)
+      if (file.exists(p))
+        return(normalizePath(p, winslash = "/", mustWork = TRUE))
+    }
+  }
+  stop("config.yaml|config.yml not found: ",
+       paste(dirs, collapse = " o "), call. = FALSE)
+}
+
+config <- yaml.load_file(find_config())
+
+
+
+
+
+## Count matrices 
+input_folder <- config$processed_data$dir
+
+## QC plots, QC csv and count matrices processed and filtered (h5seurat format)
+output_folder <- config$integration_data$dir
+dir.create(output_folder, recursive = TRUE, showWarnings = FALSE)
+
+
+sc_AS <- LoadH5Seurat(
+    file = file.path(input_folder, config$processed_data$file))
+sc_AS <- DietSeurat(sc_AS)
+```
+
+
+
+```{r}
+SC.list <- SplitObject(sc_AS, split.by = "Patient")
+rm(sc_AS)
+print(SC.list)
+gc()
+SC.list <- lapply(
+    X = SC.list, 
+    function(x){SCTransform(
+        object = x, 
+        vars.to.regress = c("mitoRatio","Phase"), 
+        method = "glmGamPoi",variable.features.n = 3000 )})
+features <- SelectIntegrationFeatures(object.list = SC.list, nfeatures = 3000)
+
+
+SC.list <- PrepSCTIntegration(object.list = SC.list, anchor.features = features)
+SA.anchors <- FindIntegrationAnchors(object.list = SC.list, 
+                                     normalization.method = "SCT",
+                                     anchor.features = features)
+SC.integrated <- IntegrateData(anchorset = SA.anchors, 
+                               normalization.method = "SCT")
+gc()
+SC.integrated <- RunPCA(SC.integrated, verbose = FALSE)
+SC.integrated <- RunUMAP(SC.integrated, reduction = "pca", dims = 1:30)
+
+SC.integrated <- FindNeighbors(SC.integrated, dims = 1:30, verbose = FALSE)
+SC.integrated <- FindClusters(SC.integrated, verbose = FALSE, resolution = 1)
+
+DimPlot(SC.integrated, group.by = "Patient", label = TRUE)
+
+SaveH5Seurat(
+  object = SC.integrated, 
+  filename = file.path(output_folder, config$integration_data$file), 
+  overwrite = TRUE)
+
+```
